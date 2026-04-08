@@ -4,8 +4,9 @@
 
     // ==================== Default Settings ====================
     const defaultSettings = {
-        apiUrl: 'http://127.0.0.1:7880/v1/audio/speech',
+        apiUrl: 'http://127.0.0.1:7880/api/v1/tts/tasks',
         cloningUrl: 'http://127.0.0.1:7880/api/v1/indextts2_cloning',
+        voiceListUrl: 'http://127.0.0.1:7880/api/v1/voices', // 获取参考音频列表
         model: 'index-tts2',
         defaultVoice: 'default.wav',
         speed: 1.0,
@@ -13,7 +14,14 @@
         parsingMode: 'gal', // 'gal' | 'audiobook'
         enableInline: true, // 启用行内增强渲染
         autoInference: false, // 回复后自动推理
+        autoPlay: false, // 推理完成后自动播放（需要浏览器已有用户交互）
+        streamingPlay: false, // 逐句推理即时播放（推理完一句立即播放，无需等全部完成）
+        streamingSkipCount: 1, // 流式推理播放：推理N句后开始播放并继续推理下一句（1=即时播放，2=推理2句后播放第1句，以此类推）
         cacheImportPath: '\\\\SillyTavern\\\\data\\\\TTSsound',
+        ambientSoundPath: '', // 背景音目录路径（备用显示）
+        ambientSoundVolume: 0.4, // 背景音独立音量 0.0 ~ 1.0
+        ambientFadeDuration: 0, // 背景音淡入淡出时长(ms)，0=关闭
+        ambientLoopByScene: false, // 场景循环播放：同场景段内背景音持续循环
         // VN format: [角色|表情]|「对话」 or [旁白]|描述
         vnRegex: '^\\[([^\\]|]+)(?:\\|[^\\]]*)?\\]\\|(.+)$',
         voiceMap: {}, // { cardId: { characterName: "voice.wav" } }
@@ -505,6 +513,208 @@
         return { init, setHandle, getHandle, requestPermission };
     })();
 
+    // ==================== Ambient Sound Player ====================
+    const AmbientPlayer = (function () {
+        let dirHandle = null;       // FileSystemDirectoryHandle for ambient folder
+        let currentScene = null;    // currently playing scene name
+        let currentAudio = null;    // HTMLAudioElement
+        let fadeTimer = null;       // rAF handle for fade
+        function _getFadeDuration() {
+            return parseInt(getSettings().ambientFadeDuration ?? 0) || 0;
+        }
+
+        async function init() {
+            try {
+                const saved = await AudioStorage.getConfig('ambientDirHandle');
+                if (saved) { dirHandle = saved; console.log('[IndexTTS2][Ambient] dir handle restored'); }
+            } catch (e) { console.warn('[IndexTTS2][Ambient] init error:', e); }
+        }
+
+        async function setDirHandle(handle) {
+            if (!handle) return;
+            dirHandle = handle;
+            await AudioStorage.saveConfig('ambientDirHandle', handle);
+        }
+
+        function getDirHandle() { return dirHandle; }
+
+        async function queryPermission() {
+            if (!dirHandle) return false;
+            try {
+                return (await dirHandle.queryPermission({ mode: 'read' })) === 'granted';
+            } catch (e) { console.warn('[IndexTTS2][Ambient] queryPermission error:', e); }
+            return false;
+        }
+
+        async function requestPermission() {
+            if (!dirHandle) return false;
+            try {
+                if ((await dirHandle.queryPermission({ mode: 'read' })) === 'granted') return true;
+                if ((await dirHandle.requestPermission({ mode: 'read' })) === 'granted') return true;
+            } catch (e) { console.warn('[IndexTTS2][Ambient] permission error:', e); }
+            return false;
+        }
+
+        function _getVolume() {
+            const s = getSettings();
+            return Math.max(0, Math.min(1, parseFloat(s.ambientSoundVolume ?? 0.4)));
+        }
+
+        function _cancelFade() {
+            if (fadeTimer !== null) { cancelAnimationFrame(fadeTimer); fadeTimer = null; }
+        }
+
+        function _fadeOut(audioEl, onDone) {
+            _cancelFade();
+            const fadeDur = _getFadeDuration();
+            if (!fadeDur) {
+                audioEl.pause();
+                audioEl.src = '';
+                if (onDone) onDone();
+                return;
+            }
+            const start = performance.now();
+            const startVol = audioEl.volume;
+            function step(now) {
+                const t = Math.min(1, (now - start) / fadeDur);
+                audioEl.volume = startVol * (1 - t);
+                if (t < 1) { fadeTimer = requestAnimationFrame(step); }
+                else {
+                    audioEl.pause();
+                    audioEl.src = '';
+                    fadeTimer = null;
+                    if (onDone) onDone();
+                }
+            }
+            fadeTimer = requestAnimationFrame(step);
+        }
+
+        function _fadeIn(audioEl) {
+            _cancelFade();
+            const target = _getVolume();
+            const fadeDur = _getFadeDuration();
+            if (!fadeDur) {
+                audioEl.volume = target;
+                return;
+            }
+            audioEl.volume = 0;
+            const start = performance.now();
+            function step(now) {
+                const t = Math.min(1, (now - start) / fadeDur);
+                audioEl.volume = target * t;
+                if (t < 1) { fadeTimer = requestAnimationFrame(step); }
+                else { fadeTimer = null; }
+            }
+            fadeTimer = requestAnimationFrame(step);
+        }
+
+        async function _loadScene(sceneName) {
+            console.log('[IndexTTS2][Ambient] _loadScene: sceneName=' + sceneName + ' dirHandle=' + (dirHandle ? dirHandle.name : 'NULL'));
+            if (!dirHandle) { console.warn('[IndexTTS2][Ambient] _loadScene: dirHandle is null, 请在设置中选择背景音目录'); return null; }
+            try {
+                // First try queryPermission (no gesture needed)
+                let hasPerm = await queryPermission();
+                console.log('[IndexTTS2][Ambient] _loadScene: queryPermission=' + hasPerm);
+                if (!hasPerm) {
+                    // Try reading directly — some browsers allow read without explicit grant
+                    console.warn('[IndexTTS2][Ambient] 权限未授权，请在设置面板点击「🔄 授权」按钮');
+                    if (window.toastr) window.toastr.warning('背景音需要授权：请打开 IndexTTS2 设置 → 背景音效 → 点击「🔄 授权」', { timeOut: 6000 });
+                    return null;
+                }
+                // Try candidate file names: exact, plus common extensions
+                const candidates = [
+                    sceneName + '.mp3', sceneName + '.wav', sceneName + '.ogg',
+                    sceneName + '.m4a', sceneName + '.aac'
+                ];
+                for (const name of candidates) {
+                    try {
+                        console.log('[IndexTTS2][Ambient] _loadScene: trying file:', name);
+                        const fileHandle = await dirHandle.getFileHandle(name);
+                        const file = await fileHandle.getFile();
+                        const url = URL.createObjectURL(file);
+                        console.log('[IndexTTS2][Ambient] _loadScene: found! url=', url);
+                        return url;
+                    } catch (_) { /* not found, try next */ }
+                }
+                console.warn('[IndexTTS2][Ambient] _loadScene: no matching file for scene:', sceneName, '— tried:', candidates);
+            } catch (e) { console.warn('[IndexTTS2][Ambient] loadScene error:', e); }
+            return null;
+        }
+
+        async function playScene(sceneName) {
+            if (!sceneName) { stop(); return; }
+            // Same scene — keep playing without restart
+            if (sceneName === currentScene && currentAudio && !currentAudio.paused) return;
+
+            const url = await _loadScene(sceneName);
+            if (!url) {
+                // No file found — silently do nothing
+                console.log('[IndexTTS2][Ambient] no file for scene:', sceneName);
+                return;
+            }
+
+            const oldAudio = currentAudio;
+            currentScene = sceneName;
+
+            const audio = new Audio(url);
+            audio.loop = true;
+            audio.volume = 0;
+            currentAudio = audio;
+
+            // Fade out old audio
+            if (oldAudio && !oldAudio.paused) {
+                _fadeOut(oldAudio, null);
+            } else {
+                _cancelFade();
+            }
+
+            try {
+                console.log('[IndexTTS2][Ambient] playScene: calling audio.play() for scene:', sceneName);
+                await audio.play();
+                console.log('[IndexTTS2][Ambient] playScene: audio.play() succeeded');
+                _fadeIn(audio);
+            } catch (e) {
+                console.warn('[IndexTTS2][Ambient] play error:', e);
+                currentAudio = null;
+                currentScene = null;
+                URL.revokeObjectURL(url);
+            }
+        }
+
+        function stop() {
+            currentScene = null;
+            if (currentAudio) {
+                _fadeOut(currentAudio, null);
+                currentAudio = null;
+            }
+        }
+
+        function stopImmediate() {
+            _cancelFade();
+            currentScene = null;
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.src = '';
+                currentAudio = null;
+            }
+        }
+
+        function setVolume(vol) {
+            const v = Math.max(0, Math.min(1, parseFloat(vol) || 0));
+            const s = getSettings();
+            s.ambientSoundVolume = v;
+            saveSettings();
+            if (currentAudio && !currentAudio.paused) {
+                _cancelFade();
+                currentAudio.volume = v;
+            }
+        }
+
+        function getVolume() { return _getVolume(); }
+
+        return { init, setDirHandle, getDirHandle, requestPermission, playScene, stop, stopImmediate, setVolume, getVolume };
+    })();
+
     async function generateHash(character, voiceId, text, speed, volume, emotion) {
         const emotionPart = emotion ? `|${emotion}` : '';
         const input = `${character || ''}|${voiceId || ''}|${speed}|${volume}|${text || ''}${emotionPart}`;
@@ -610,6 +820,29 @@
     }
 
     // ==================== VN / Audiobook Parsing ====================
+    // 8 维情感向量顺序：开心、愤怒、悲伤、恐惧、厌恶、忧郁、惊讶、平静
+    const textEmotionVectorMap = {
+        开心: '1,0,0,0,0,0,0,0',
+        愤怒: '0,1,0,0,0,0,0,0',
+        悲伤: '0,0,1,0,0,0,0,0',
+        恐惧: '0,0,0,1,0,0,0,0',
+        厌恶: '0,0,0,0,1,0,0,0',
+        忧郁: '0,0,0,0,0,1,0,0',
+        惊讶: '0,0,0,0,0,0,1,0',
+        平静: '0,0,0,0,0,0,0,1',
+    };
+
+    const textEmotionAliasMap = {
+        通常: '平静',
+    };
+
+    function getEmotionVectorFromText(label) {
+        const normalized = (label || '').trim().replace(/\s+/g, '');
+        if (!normalized) return null;
+        const canonical = textEmotionVectorMap[normalized] ? normalized : textEmotionAliasMap[normalized];
+        return canonical ? textEmotionVectorMap[canonical] : null;
+    }
+
     // 兼容: [角色|表情]|「对话」、[角色][表情] 对话、[角色] 内容（无引号），宽松空白
     function parseVNLine(text) {
         try {
@@ -621,8 +854,13 @@
             const trimmed = (text || '').trim().replace(/\s+/g, ' ').trim();
             if (!trimmed) return null;
 
-            // 提取可选的情感向量 [数字,数字,...]
+            // 优先提取显式情感向量 [数字,数字,...]，若缺失则尝试将文本表情映射为 8 维向量
             let emotion = null;
+            const applyTextEmotion = (label) => {
+                if (!emotion) {
+                    emotion = getEmotionVectorFromText(label);
+                }
+            };
             try {
                 const emotionMatch = trimmed.match(/\]\s*\[([\d.,\s-]+)\]/);
                 if (emotionMatch) {
@@ -630,30 +868,67 @@
                 }
             } catch (_) { /* 格式错误时静默忽略 */ }
 
-            // 格式 A: [角色|表情]|「对话」 或 [角色]|「对话」，宽松 \s*
-            // 新增：可选匹配情感向量 [角色|表情][情感向量]|「对话」
-            const pipeRegex = /^\s*\[([^|\]\n]+)(?:\|[^\]\n]*)?\](?:\[[\d.,\s-]*\])?\s*\|\s*([「""『](.*?)[」""』])\s*$/;
-            let match = trimmed.match(pipeRegex);
+            // 格式 A-NEW: [角色][表情][场景]:「对话」（三重标签，含场景字段）
+            const threeTagRegex = /^\s*\[([^\]\n]+)\]\s*\[([^\]\n]*)\]\s*\[([^\]\n]+)\]\s*:?\s*([「“”『](.*?)[」””』]|.+)\s*$/;
+            const m3 = trimmed.match(threeTagRegex);
+            if (m3) {
+                const character = (m3[1] || '').replace(/\s+/g, ' ').trim();
+                const expression = (m3[2] || '').replace(/\s+/g, ' ').trim();
+                const scene = (m3[3] || '').replace(/\s+/g, ' ').trim();
+                const rawContent = (m3[4] || '').trim();
+                const quoteInner = m3[5];
+                const inner = quoteInner !== undefined ? quoteInner.trim() : rawContent;
+                if (character && inner) {
+                    applyTextEmotion(expression);
+                    const r3 = { character, scene, dialogue: inner, rawContent, quoted: rawContent, isAction: false, isQuoted: quoteInner !== undefined, emotion };
+                    console.log('[IndexTTS2][Ambient] parseVNLine 三标签命中 character=' + character + ' scene=' + scene + ' dialogue=' + inner);
+                    return r3;
+                }
+            }
+            // 格式 A0: [角色]|[表情]:「对话」 或 [角色][表情]:「对话」（表情后可带冒号）
+            // 兼容: [王淑琴]|[职业微笑]:「...」 和 [王淑琴][职业微笑]:「...」
+            const pipeTagRegex = /^\s*\[([^\]\n]+)\]\s*(?:\|\s*)?\[([^\]]*)\]\s*:?\s*([「""『](.*?)[」""』]|.+)\s*$/;
+            let match = trimmed.match(pipeTagRegex);
             if (match) {
                 const character = (match[1] || '').replace(/\s+/g, ' ').trim();
-                const quoted = (match[2] || '').trim();
-                const inner = (match[3] || '').trim();
+                const expression = (match[2] || '').replace(/\s+/g, ' ').trim();
+                const rawContent = (match[3] || '').trim();
+                const quoteInner = match[4];
+                const inner = quoteInner !== undefined ? quoteInner.trim() : rawContent;
                 if (character && inner) {
+                    applyTextEmotion(expression);
+                    return { character, dialogue: inner, rawContent, quoted: rawContent, isAction: false, isQuoted: quoteInner !== undefined, emotion };
+                }
+            }
+
+            // 格式 A: [角色|表情]|「对话」 或 [角色]|「对话」，宽松 \s*
+            // 新增：可选匹配情感向量 [角色|表情][情感向量]|「对话」
+            const pipeRegex = /^\s*\[([^|\]\n]+)(?:\|([^\]\n]*))?\](?:\[[\d.,\s-]*\])?\s*\|\s*([「""『](.*?)[」""』])\s*$/;
+            match = trimmed.match(pipeRegex);
+            if (match) {
+                const character = (match[1] || '').replace(/\s+/g, ' ').trim();
+                const expression = (match[2] || '').replace(/\s+/g, ' ').trim();
+                const quoted = (match[3] || '').trim();
+                const inner = (match[4] || '').trim();
+                if (character && inner) {
+                    applyTextEmotion(expression);
                     return { character, dialogue: inner, rawContent: quoted, quoted, isAction: false, isQuoted: true, emotion };
                 }
             }
 
             // 格式 B: [角色][表情] 对话 或 [角色] 对话（无竖线）
             // 新增：可选匹配情感向量 [角色][表情][情感向量] 对话
-            const bracketRegex = /^\s*\[([^\]]+)\](?:\[[^\]]*\])?(?:\[[\d.,\s-]*\])?\s+(.+)\s*$/;
+            const bracketRegex = /^\s*\[([^\]]+)\](?:\[([^\]]*)\])?(?:\[[\d.,\s-]*\])?\s+(.+)\s*$/;
             match = trimmed.match(bracketRegex);
             if (match) {
                 const character = (match[1] || '').replace(/\s+/g, ' ').trim();
-                let content = (match[2] || '').trim();
+                const expression = (match[2] || '').replace(/\s+/g, ' ').trim();
+                let content = (match[3] || '').trim();
                 if (!character || !content) return null;
                 const quoteMatch = content.match(/^[「""『](.*?)[」""』]\s*$/);
                 const dialogue = quoteMatch ? quoteMatch[1].trim() : content;
                 if (!dialogue) return null;
+                applyTextEmotion(expression);
                 return { character, dialogue, rawContent: content, quoted: content, isAction: false, isQuoted: !!quoteMatch, emotion };
             }
 
@@ -710,6 +985,11 @@
             const cached = await AudioStorage.getAudio(hash);
             if (cached && cached.blob) {
                 console.log('[IndexTTS2] [Cache Hit]', hash);
+                console.log('[IndexTTS2] Emotion debug (cache hit):', {
+                    input: text,
+                    voice: normVoice,
+                    emotion,
+                });
                 return {
                     hash,
                     blob: cached.blob,
@@ -727,16 +1007,20 @@
 
         if (!allowFetch) {
             console.log('[IndexTTS2] Auto-inference disabled & cache miss, skipping API request.');
+            console.log('[IndexTTS2] Emotion debug (request skipped):', {
+                input: text,
+                voice: normVoice,
+                emotion,
+            });
             return null;
         }
 
         console.log('[IndexTTS2] [API Request]', hash);
         const payload = {
-            model: settings.model,
-            input: text,
-            voice: normVoice,
-            response_format: 'wav',
-            speed: speed,
+            text: text,
+            prompt_audio: normVoice,
+            clean_text: true,
+            max_text_tokens_per_segment: 120,
         };
         if (emotion) {
             const emoVec = emotion.split(',').map(v => parseFloat(v.trim()));
@@ -746,6 +1030,15 @@
                 payload.emo_weight = 0.6;
             }
         }
+
+        console.log('[IndexTTS2] TTS payload emotion debug:', {
+            text,
+            prompt_audio: normVoice,
+            emotion,
+            emo_control_method: payload.emo_control_method ?? null,
+            emo_vec: payload.emo_vec ?? null,
+            emo_weight: payload.emo_weight ?? null,
+        });
 
         try {
             const res = await fetch(settings.apiUrl, {
@@ -901,7 +1194,11 @@
         } catch (e) {
             cleanup();
             console.error('[IndexTTS2] Audio play error:', e);
-            if (window.toastr) window.toastr.error('播放失败: ' + e.message);
+            if (e.name === 'NotAllowedError') {
+                if (window.toastr) window.toastr.warning('浏览器已拦截自动播放，请先点击页面任意处，或手动点击播放按钮');
+            } else {
+                if (window.toastr) window.toastr.error('播放失败: ' + e.message);
+            }
         }
     }
 
@@ -911,40 +1208,58 @@
     }
 
     // ==================== Voice Cloning ====================
-    async function cloneVoice(characterName, base64Audio) {
+    async function cloneVoice(characterName, base64Audio, originalFileName) {
         const settings = getSettings();
         console.log(`[IndexTTS2] Clone: ${characterName}, base64 len=${base64Audio.length}`);
 
         try {
-            const res = await fetch(settings.cloningUrl, {
+            // 将 base64 转换为 Blob，使用 multipart/form-data 上传到 /api/v1/upload
+            const byteString = atob(base64Audio);
+            const ab = new ArrayBuffer(byteString.length);
+            const ia = new Uint8Array(ab);
+            for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+            const blob = new Blob([ab], { type: 'audio/wav' });
+
+            // 直接使用原始文件名，不做任何重命名或过滤
+            const uploadFileName = originalFileName || (characterName + '.wav');
+
+            const formData = new FormData();
+            formData.append('file', blob, uploadFileName);
+
+            // 从 cloningUrl 提取 baseUrl，换用后端已有的 /api/v1/upload 接口
+            const baseUrl = (settings.cloningUrl || 'http://127.0.0.1:7880/api/v1/indextts2_cloning')
+                .replace(/\/api\/v1\/indextts2_cloning.*$/, '')
+                .replace(/\/+$/, '');
+            const uploadUrl = baseUrl + '/api/v1/upload';
+
+            console.log(`[IndexTTS2] Uploading to: ${uploadUrl}, filename: ${uploadFileName}`);
+
+            const res = await fetch(uploadUrl, {
                 method: 'POST',
                 mode: 'cors',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name: characterName,
-                    description: 'ST Clone',
-                    speaker_file_base64: base64Audio
-                })
+                body: formData
+                // 不手动设置 Content-Type，让浏览器自动附加 multipart boundary
             });
 
             const text = await res.text();
-            console.log(`[IndexTTS2] Clone response: ${res.status}`, text);
+            console.log(`[IndexTTS2] Upload response: ${res.status}`, text);
 
             if (!res.ok) {
-                if (window.toastr) window.toastr.error(`克隆失败 HTTP ${res.status}`);
+                if (window.toastr) window.toastr.error(`上传失败 HTTP ${res.status}: ${text}`);
                 return null;
             }
 
             const data = JSON.parse(text);
-            const id = data.id || data.voice_id || data.filename || data.name;
+            // 后端返回 { filename, path, message }，用 filename 作为音色 ID
+            const id = data.filename || data.id || data.voice_id || data.name;
             if (id) {
-                if (window.toastr) window.toastr.success(`克隆成功: ${id}`);
+                if (window.toastr) window.toastr.success(`参考音频上传成功: ${id}`);
                 return id;
             }
             return null;
         } catch (e) {
             console.error('[IndexTTS2] Clone Error:', e);
-            if (window.toastr) window.toastr.error('克隆失败: ' + e.message);
+            if (window.toastr) window.toastr.error('上传失败: ' + e.message);
             return null;
         }
     }
@@ -970,10 +1285,9 @@
                 <div class="indextts-char-row" data-char="${char}">
                     <div class="indextts-char-name" title="${char}">${char}</div>
                     <div class="indextts-char-audio">
-                        <div class="indextts-drop-area ${isConfigured ? 'configured' : ''}" data-char="${char}">
-                            <span class="indextts-drop-text">${voice || '未配置 (拖拽上传)'}</span>
-                            <input type="file" class="indextts-file-input" accept="audio/*" style="display:none;">
-                        </div>
+                        <select class="indextts-voice-select text_pole" data-char="${char}">
+                            <option value="">-- 加载中... --</option>
+                        </select>
                         <input type="text" class="indextts-voice-input text_pole" data-char="${char}" value="${voice || ''}" placeholder="文件名.wav">
                         <div class="indextts-del-btn" data-char="${char}" title="删除配置"><i class="fa-solid fa-trash"></i></div>
                     </div>
@@ -1173,36 +1487,61 @@
                     }
                 };
             });
-            // Inputs
+
+            // 手动输入框同步 voiceMap
             container.querySelectorAll('.indextts-voice-input').forEach(input => {
                 input.onchange = () => {
                     const char = input.dataset.char;
                     voiceMap[char] = input.value.trim();
-                    saveSettings(); // Save immediately on blur/change
+                    // 同步更新下拉框选中项
+                    const sel = container.querySelector(`.indextts-voice-select[data-char="${char}"]`);
+                    if (sel) {
+                        const opt = [...sel.options].find(o => o.value === input.value.trim());
+                        if (opt) sel.value = opt.value;
+                    }
+                    saveSettings();
                 };
             });
 
-            // Drag & Drop
-            container.querySelectorAll('.indextts-drop-area').forEach(area => {
-                const char = area.dataset.char;
-                const fileInput = area.querySelector('.indextts-file-input');
-                const dropText = area.querySelector('.indextts-drop-text');
-                const voiceInput = container.querySelector(`.indextts-voice-input[data-char="${char}"]`);
+            // 下拉选择框：从后端获取音频列表并填充
+            const settings = getSettings();
+            const voiceListUrl = settings.voiceListUrl || 'http://127.0.0.1:7880/api/v1/voices';
 
-                area.onclick = e => { if (e.target !== fileInput) fileInput?.click(); };
-                fileInput.onchange = async () => {
-                    const file = fileInput.files[0];
-                    if (file) await handleUpload(char, file, dropText, voiceInput);
-                };
-                area.ondragover = e => { e.preventDefault(); area.classList.add('dragover'); };
-                area.ondragleave = () => area.classList.remove('dragover');
-                area.ondrop = async e => {
-                    e.preventDefault();
-                    area.classList.remove('dragover');
-                    const file = e.dataTransfer.files[0];
-                    if (file) await handleUpload(char, file, dropText, voiceInput);
-                };
-            });
+            // 一次性拉取音频列表，填充所有 select
+            fetch(voiceListUrl, { mode: 'cors' })
+                .then(r => r.json())
+                .then(data => {
+                    // 后端返回 { voices: [...], directory: ... }
+                    const voices = Array.isArray(data) ? data : (data.voices || []);
+                    container.querySelectorAll('.indextts-voice-select').forEach(sel => {
+                        const char = sel.dataset.char;
+                        const currentVoice = voiceMap[char] || '';
+                        sel.innerHTML = '<option value="">-- 请选择参考音频 --</option>'
+                            + voices.map(v => {
+                                const name = typeof v === 'string' ? v : (v.filename || v.name || v);
+                                return `<option value="${name}"${name === currentVoice ? ' selected' : ''}>${name}</option>`;
+                            }).join('');
+                        // 如果当前值不在列表中但手动输入了，补一个 option
+                        if (currentVoice && !voices.some(v => (typeof v === 'string' ? v : (v.filename || v.name)) === currentVoice)) {
+                            sel.innerHTML += `<option value="${currentVoice}" selected>${currentVoice} (手动)</option>`;
+                        }
+                        sel.onchange = () => {
+                            const val = sel.value;
+                            voiceMap[char] = val;
+                            const voiceInput = container.querySelector(`.indextts-voice-input[data-char="${char}"]`);
+                            if (voiceInput) voiceInput.value = val;
+                            saveSettings();
+                        };
+                    });
+                })
+                .catch(() => {
+                    container.querySelectorAll('.indextts-voice-select').forEach(sel => {
+                        const char = sel.dataset.char;
+                        const currentVoice = voiceMap[char] || '';
+                        sel.innerHTML = `<option value="" disabled>⚠ 无法获取列表</option>`
+                            + (currentVoice ? `<option value="${currentVoice}" selected>${currentVoice}</option>` : '');
+                    });
+                });
         }
     }
 
@@ -1214,7 +1553,7 @@
 
         try {
             const base64 = await convertToWav(file);
-            const id = await cloneVoice(char, base64);
+            const id = await cloneVoice(char, base64, file.name);
             if (id) {
                 const finalId = ensureWavSuffix(id);
                 if (dropText) { dropText.textContent = finalId; dropText.className = 'indextts-drop-text success'; }
@@ -1293,7 +1632,8 @@
                     original: trimmed,
                     parsed: parsed,
                     // Remove fallback to defaultVoice to detect unset state
-                    voice: voiceMap[parsed.character]
+                    voice: voiceMap[parsed.character],
+                    scene: parsed.scene || null
                 });
             }
         }
@@ -1438,9 +1778,11 @@
                 result.push({
                     text: parsed.dialogue,
                     character: parsed.character,
+                    scene: parsed.scene || null,
                     voice: voice !== undefined && voice !== null && voice !== '' ? voice : undefined,
                     emotion: parsed.emotion || null,
                 });
+                console.log('[IndexTTS2][Ambient] collectVNLines push: character=' + parsed.character + ' scene=' + (parsed.scene || 'null'));
             }
         }
         return result;
@@ -2066,14 +2408,275 @@
         return { show, hide, updateProgress, updatePlayState, updateInfo };
     })();
 
+    // 流式推理播放辅助函数
+    async function streamInferAndPlay(msg, lines, triggerBtn, isSilent) {
+        const settings = getSettings();
+        const mesId = getMessageId(msg);
+        if (!mesId) return [];
+
+        const list = []; // 已推理的音频列表
+        const skipCount = settings.streamingSkipCount || 1;
+        let currentInferIndex = 0;
+        let currentPlayIndex = 0;
+        let isPlaying = false;
+        let currentAudio = null;
+        let inferDone = false;
+        let cachedCount = 0;
+
+        // 创建唯一会话ID用于流式播放
+        const sessionId = Date.now();
+
+        // 辅助函数：播放队列中的音频
+        const playNextAudio = async () => {
+            console.log('[IndexTTS2] Streaming: playNextAudio called, currentPlayIndex=' + currentPlayIndex + ', list.length=' + list.length);
+
+            // 如果队列为空，等待新内容
+            const waitForContent = () => {
+                return new Promise(resolve => {
+                    const checkInterval = setInterval(() => {
+                        if (currentPlayIndex < list.length) {
+                            clearInterval(checkInterval);
+                            resolve();
+                        } else if (inferDone) {
+                            clearInterval(checkInterval);
+                            resolve('done');
+                        }
+                    }, 50);
+                });
+            };
+
+            const waitResult = await waitForContent();
+            if (waitResult === 'done' || currentPlayIndex >= list.length) {
+                console.log('[IndexTTS2] Streaming: playback finished');
+                AmbientPlayer.stop(); // 停止背景音
+                if (currentPlayback.stop) currentPlayback.stop();
+                clearPlayingInMessage(msg);
+                return;
+            }
+
+            const item = list[currentPlayIndex];
+            if (!item) {
+                console.warn('[IndexTTS2] Streaming: invalid item at index', currentPlayIndex);
+                currentPlayIndex++;
+                playNextAudio();
+                return;
+            }
+
+            // 清理之前的音频
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.onended = null;
+                currentAudio.onerror = null;
+                currentAudio.src = '';
+            }
+
+            currentAudio = new Audio(item.blobUrl);
+            currentPlayback.audio = currentAudio;
+            currentPlayback.msg = msg;
+            currentPlayback.mesId = mesId;
+            currentPlayback.index = currentPlayIndex;
+            currentPlayback.sessionId = sessionId;
+
+            // 音量与速度
+            const vol = parseFloat(settings.volume || 1.0);
+            currentAudio.volume = Math.max(0, Math.min(1, vol));
+            currentAudio.playbackRate = parseFloat(settings.speed || 1.0);
+
+            // UI高亮
+            const encT = utf8ToBase64(item.text);
+            const encC = utf8ToBase64(item.character || '');
+            clearPlayingInMessage(msg);
+            setLinePlayingByEncoded(msg, encT, encC, true);
+
+            // 更新浮动播放器
+            const avatarEl = msg.querySelector('.avatar img');
+            let displayChar = item.character || 'Unknown';
+            if (displayChar.toLowerCase() === 'narrator' && avatarEl) {
+                const nameEl = msg.querySelector('.ch_name');
+                if (nameEl) displayChar = nameEl.textContent.trim();
+            }
+            TTSPlayerWindow.updateInfo({
+                name: displayChar,
+                text: item.text,
+                avatarUrl: avatarEl ? avatarEl.src : null
+            });
+
+            attachMiniPlayerToAudio(currentAudio, true);
+
+            // 场景背景音 - 流式播放时每个track都播放
+            console.log('[IndexTTS2][Streaming] Ambient playScene: ' + item.scene);
+            AmbientPlayer.playScene(item.scene || null);
+
+            // 播放结束回调
+            currentAudio.onended = () => {
+                setLinePlayingByEncoded(msg, encT, encC, false);
+                // 停止背景音（非最后一句用stopImmediate，最后一句用stop）
+                if (currentPlayIndex + 1 < list.length) {
+                    AmbientPlayer.stopImmediate();
+                } else {
+                    AmbientPlayer.stop();
+                }
+                currentPlayIndex++;
+                playNextAudio();
+            };
+
+            currentAudio.onerror = () => {
+                console.error('[IndexTTS2] Streaming track error at index:', currentPlayIndex);
+                setLinePlayingByEncoded(msg, encT, encC, false);
+                AmbientPlayer.stopImmediate();
+                currentPlayIndex++;
+                playNextAudio();
+            };
+
+            try {
+                await currentAudio.play();
+            } catch (e) {
+                if (e.name === 'NotAllowedError') {
+                    if (window.toastr) window.toastr.warning('浏览器已拦截自动播放，请先点击页面任意处');
+                    return;
+                }
+                // 出错则跳到下一句
+                currentPlayIndex++;
+                playNextAudio();
+            }
+        };
+
+        // 推理循环
+        const inferLoop = async () => {
+            console.log('[IndexTTS2] Streaming: starting inferLoop, lines.length=' + lines.length + ', skipCount=' + skipCount);
+            while (currentInferIndex < lines.length) {
+                // 只在播放开始后才检查 session 匹配
+                if (isPlaying && currentPlayback.sessionId !== sessionId) {
+                    console.log('[IndexTTS2] Streaming: inferLoop stopped due to session mismatch');
+                    return;
+                }
+
+                const line = lines[currentInferIndex];
+                if (!line.voice) {
+                    currentInferIndex++;
+                    continue;
+                }
+
+                try {
+                    const record = await ensureAudioRecord({
+                        text: line.text,
+                        character: line.character,
+                        voice: line.voice,
+                        emotion: line.emotion,
+                    });
+                    if (!record) {
+                        currentInferIndex++;
+                        continue;
+                    }
+
+                    if (record.isCached) cachedCount++;
+                    const blobUrl = URL.createObjectURL(record.blob);
+                    const newItem = {
+                        text: line.text,
+                        character: line.character,
+                        scene: line.scene || null,
+                        voice: line.voice,
+                        hash: record.hash,
+                        blobUrl,
+                    };
+
+                    // 添加到播放列表
+                    list.push(newItem);
+                    audioCache[mesId] = list;
+                    console.log('[IndexTTS2] Streaming: added item, list.length=' + list.length);
+
+                    // 通知UI更新进度
+                    if (window.toastr && !isSilent) {
+                        const progress = Math.round(((currentInferIndex + 1) / lines.length) * 100);
+                        window.toastr.info(`推理进度: ${currentInferIndex + 1}/${lines.length} (${progress}%)`, { timeOut: 1000 });
+                    }
+
+                    // 如果推理数量达到阈值，开始播放
+                    if (list.length >= skipCount && !isPlaying) {
+                        console.log('[IndexTTS2] Streaming: triggering playback, list.length=' + list.length + ', skipCount=' + skipCount);
+                        isPlaying = true;
+                        currentPlayIndex = 0;
+
+                        // 创建全局控制器
+                        currentPlayback.sessionId = sessionId;
+                        currentPlayback.controller = {
+                            pause: () => { if (currentAudio) currentAudio.pause(); },
+                            play: () => { if (currentAudio) currentAudio.play(); },
+                            seek: (percent) => {
+                                const targetTime = list.length * percent;
+                                const targetIndex = Math.min(Math.floor(targetTime), list.length - 1);
+                                if (targetIndex === currentPlayIndex && currentAudio) {
+                                    currentAudio.currentTime = targetTime - targetIndex;
+                                } else {
+                                    currentPlayIndex = targetIndex;
+                                    playNextAudio();
+                                }
+                            }
+                        };
+
+                        TTSPlayerWindow.show(msg, currentPlayback.controller);
+                        playNextAudio();
+                    }
+
+                } catch (e) {
+                    console.error('[IndexTTS2] Streaming infer error:', e);
+                }
+
+                currentInferIndex++;
+
+                // 如果推理完成了但还没开始播放（skipCount > list.length）
+                if (currentInferIndex >= lines.length && !isPlaying && list.length > 0) {
+                    inferDone = true;
+                    isPlaying = true;
+                    currentPlayIndex = 0;
+
+                    // 创建全局控制器
+                    currentPlayback.sessionId = sessionId;
+                    currentPlayback.controller = {
+                        pause: () => { if (currentAudio) currentAudio.pause(); },
+                        play: () => { if (currentAudio) currentAudio.play(); },
+                        seek: (percent) => {
+                            const targetTime = list.length * percent;
+                            const targetIndex = Math.min(Math.floor(targetTime), list.length - 1);
+                            if (targetIndex === currentPlayIndex && currentAudio) {
+                                currentAudio.currentTime = targetTime - targetIndex;
+                            } else {
+                                currentPlayIndex = targetIndex;
+                                playNextAudio();
+                            }
+                        }
+                    };
+
+                    TTSPlayerWindow.show(msg, currentPlayback.controller);
+                    playNextAudio();
+                }
+            }
+        };
+
+        // 开始推理
+        inferLoop();
+
+        return list;
+    }
+
     async function inferMessageAudios(msg, triggerBtn, isSilent = false) {
         if (!msg) return;
         const mesId = getMessageId(msg);
         if (!mesId) return;
 
-        // 已有缓存则直接使用
+        // 已有缓存则直接使用（非流式模式）
         if (audioCache[mesId] && audioCache[mesId].length) {
-            return audioCache[mesId];
+            const settings = getSettings();
+            // 如果启用了流式播放，先清空缓存重新推理
+            if (settings.streamingPlay) {
+                // 清空该消息的缓存，准备流式推理
+                audioCache[mesId].forEach(item => {
+                    if (item.blobUrl) URL.revokeObjectURL(item.blobUrl);
+                });
+                delete audioCache[mesId];
+            } else {
+                return audioCache[mesId];
+            }
         }
 
         // 推理锁：防止重复请求
@@ -2099,41 +2702,56 @@
             if (inferBtn) inferBtn.classList.add('indextts-inferring');
         }
 
+        const settings = getSettings();
+
         try {
             const cardId = getCardId();
             const lines = collectVNLinesFromMessage(msg);
             const list = [];
             const unvoicedCount = lines.filter(l => !l.voice).length;
-            let cachedCount = 0;
 
             if (!lines.length) {
                 if (!isSilent && window.toastr) window.toastr.warning('未在消息中发现符合格式的 [角色] 文本，请检查是否为 GAL 模式及剧本格式');
+                return [];
             } else if (unvoicedCount === lines.length) {
                 if (!isSilent && window.toastr) window.toastr.warning('发现角色对话但均未在配置表格中关联配音，请先点击配置绑定音色');
-            } else {
-                for (const line of lines) {
-                    try {
-                        if (!line.voice) continue;
+                return [];
+            }
 
-                        const record = await ensureAudioRecord({
-                            text: line.text,
-                            character: line.character,
-                            voice: line.voice,
-                            emotion: line.emotion,
-                        });
-                        if (!record) continue;
-                        if (record.isCached) cachedCount++;
-                        const blobUrl = URL.createObjectURL(record.blob);
-                        list.push({
-                            text: line.text,
-                            character: line.character,
-                            voice: line.voice,
-                            hash: record.hash,
-                            blobUrl,
-                        });
-                    } catch (e) {
-                        console.error('[IndexTTS2] inferMessageAudios line error:', e);
-                    }
+            // 流式推理播放模式
+            if (settings.streamingPlay) {
+                const skipCount = settings.streamingSkipCount || 1;
+                if (window.toastr && !isSilent) {
+                    window.toastr.info(`流式推理播放模式已启用（每推理 ${skipCount} 句后开始播放）`);
+                }
+                return await streamInferAndPlay(msg, lines, triggerBtn, isSilent);
+            }
+
+            // 传统模式：全部推理完成后再播放
+            let cachedCount = 0;
+            for (const line of lines) {
+                try {
+                    if (!line.voice) continue;
+
+                    const record = await ensureAudioRecord({
+                        text: line.text,
+                        character: line.character,
+                        voice: line.voice,
+                        emotion: line.emotion,
+                    });
+                    if (!record) continue;
+                    if (record.isCached) cachedCount++;
+                    const blobUrl = URL.createObjectURL(record.blob);
+                    list.push({
+                        text: line.text,
+                        character: line.character,
+                        scene: line.scene || null,
+                        voice: line.voice,
+                        hash: record.hash,
+                        blobUrl,
+                    });
+                } catch (e) {
+                    console.error('[IndexTTS2] inferMessageAudios line error:', e);
                 }
             }
 
@@ -2238,6 +2856,22 @@
             const currentQueueId = Date.now();
             currentPlayback.sessionId = currentQueueId;
 
+            // Precompute scene segments for ambientLoopByScene mode
+            // Each playlist item gets: sceneSegStart, sceneSegEnd (inclusive indices of its scene run)
+            (function buildSceneSegments() {
+                let i = 0;
+                while (i < playlist.length) {
+                    const scene = playlist[i].scene;
+                    let j = i;
+                    while (j < playlist.length && playlist[j].scene === scene) j++;
+                    for (let k = i; k < j; k++) {
+                        playlist[k].sceneSegStart = i;
+                        playlist[k].sceneSegEnd = j - 1;
+                    }
+                    i = j;
+                }
+            })();
+
             const playTrack = (index, seekTime = 0) => {
                 // Session Check
                 if (currentPlayback.sessionId !== currentQueueId) return;
@@ -2276,6 +2910,18 @@
                 const vol = parseFloat(settings.volume || 1.0);
                 audio.volume = Math.max(0, Math.min(1, vol));
                 audio.playbackRate = parseFloat(settings.speed || 1.0);
+
+                // 场景背景音
+                console.log('[IndexTTS2][Ambient] playTrack index=' + index + ' scene=' + item.scene + ' dirHandle=' + (AmbientPlayer.getDirHandle() ? 'SET' : 'NULL'));
+                if (getSettings().ambientLoopByScene) {
+                    // 场景循环模式：仅在该 scene 段的第一条 track 启动背景音
+                    if (index === item.sceneSegStart) {
+                        console.log('[IndexTTS2][Ambient] LoopByScene: START scene=' + item.scene + ' seg=[' + item.sceneSegStart + ',' + item.sceneSegEnd + ']');
+                        AmbientPlayer.playScene(item.scene || null);
+                    }
+                } else {
+                    AmbientPlayer.playScene(item.scene || null);
+                }
 
                 // Seek if needed
                 if (seekTime > 0) {
@@ -2318,6 +2964,21 @@
                 // Events
                 audio.onended = () => {
                     setLinePlayingByEncoded(msg, encT, encC, false);
+                    if (getSettings().ambientLoopByScene) {
+                        // 场景循环模式：仅在该 scene 段的最后一条 track 结束时停止背景音
+                        const isLastInSeg = (index === item.sceneSegEnd);
+                        const isLastTrack = (index + 1 >= playlist.length);
+                        if (isLastInSeg || isLastTrack) {
+                            console.log('[IndexTTS2][Ambient] LoopByScene: STOP scene=' + item.scene + ' isLastTrack=' + isLastTrack);
+                            AmbientPlayer.stop();
+                        }
+                    } else {
+                        if (index + 1 >= playlist.length) {
+                            AmbientPlayer.stop();
+                        } else {
+                            AmbientPlayer.stopImmediate();
+                        }
+                    }
                     playTrack(index + 1);
                 };
                 audio.onerror = () => {
@@ -2327,6 +2988,14 @@
 
                 audio.play().catch(e => {
                     console.error('[IndexTTS2] Auto-play block?', e);
+                    // 浏览器自动播放策略拦截：提示用户手动点击，不继续跳轨
+                    if (e.name === 'NotAllowedError') {
+                        if (window.toastr) window.toastr.warning('浏览器已拦截自动播放，请先点击页面任意处，或手动点击播放按钮');
+                        // 标记播放按钮为已就绪，方便用户手动点击
+                        const playBtn = msg.querySelector('.indextts-play');
+                        if (playBtn) playBtn.classList.add('indextts-prepared');
+                        return;
+                    }
                     playTrack(index + 1);
                 });
             };
@@ -2380,6 +3049,34 @@
         });
     }
 
+
+    // ==================== Auto Play ====================
+    // 自动播放：推理完成后触发，处理浏览器自动播放限制
+    async function autoPlayMessage(msg) {
+        if (!msg) return;
+        const mesId = getMessageId(msg);
+        if (!mesId) return;
+
+        // 如果当前已有播放，不打断
+        if (currentPlayback.audio && !currentPlayback.audio.paused) {
+            console.log('[IndexTTS2] AutoPlay: skipped, audio already playing');
+            return;
+        }
+
+        const queue = audioCache[mesId] || [];
+        if (!queue.length) {
+            console.log('[IndexTTS2] AutoPlay: no audio in cache for', mesId);
+            return;
+        }
+
+        console.log('[IndexTTS2] AutoPlay: starting playback for', mesId);
+        try {
+            playMessageQueue(msg, null);
+        } catch (e) {
+            // 捕获同步异常（异步异常在 playMessageQueue 内部处理）
+            console.warn('[IndexTTS2] AutoPlay: playMessageQueue threw synchronously:', e);
+        }
+    }
 
     function refreshAllMessages() {
         document.querySelectorAll('.mes[is_user="false"]').forEach(msg => {
@@ -2445,7 +3142,7 @@
                         
                         <!-- 预设管理 -->
                         <div class="indextts-setting-module">
-                            <div class="indextts-module-header">⚙ 预设管理</div>
+                            <div class="indextts-module-header">⚙️ 预设管理</div>
                             <div class="indextts-preset-bar">
                                 <select id="indextts-preset-select" class="text_pole"></select>
                                 <input type="text" id="indextts-preset-name" class="text_pole" placeholder="预设名称">
@@ -2468,6 +3165,10 @@
                             <div class="indextts-setting-row">
                                 <label>音色克隆地址</label>
                                 <input type="text" id="indextts-clone-url" class="text_pole" value="${settings.cloningUrl}">
+                            </div>
+                            <div class="indextts-setting-row">
+                                <label>音频列表地址</label>
+                                <input type="text" id="indextts-voice-list-url" class="text_pole" value="${settings.voiceListUrl || 'http://127.0.0.1:7880/api/v1/voices'}">
                             </div>
                              <div class="indextts-setting-row">
                                 <label>推理模型名称</label>
@@ -2502,7 +3203,7 @@
 
                         <!-- 模块2：播放与自动化 -->
                          <div class="indextts-setting-module">
-                            <div class="indextts-module-header">▶ 播放与自动化</div>
+                            <div class="indextts-module-header">▶️ 播放与自动化</div>
                             <div class="indextts-setting-row">
                                 <label>解析模式</label>
                                 <select id="indextts-parsing-mode" class="text_pole">
@@ -2517,6 +3218,21 @@
                              <div class="indextts-setting-row checkbox-row">
                                 <label for="indextts-auto-inference">回复后自动推理</label>
                                 <input type="checkbox" id="indextts-auto-inference"${settings.autoInference === true ? ' checked' : ''}>
+                            </div>
+                             <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-auto-play">推理完毕后自动续播</label>
+                                <input type="checkbox" id="indextts-auto-play"${settings.autoPlay === true ? ' checked' : ''}>
+                            </div>
+                             <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-streaming-play">推理完N句后自动续播</label>
+                                <input type="checkbox" id="indextts-streaming-play"${settings.streamingPlay === true ? ' checked' : ''}>
+                            </div>
+                            <div class="indextts-setting-row" id="indextts-streaming-skip-row" style="${settings.streamingPlay !== true ? 'display: none;' : ''}">
+                                <label for="indextts-streaming-skip-count">推理句数</label>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <input type="number" id="indextts-streaming-skip-count" class="text_pole" min="1" max="50" value="${settings.streamingSkipCount || 1}" style="width: 80px;">
+                                    <span style="font-size: 0.85em; opacity: 0.7;">句（1=即时播放，2=推理2句后播放...）</span>
+                                </div>
                             </div>
                             <div class="indextts-setting-row">
                                 <label>默认朗读音色</label>
@@ -2534,7 +3250,7 @@
 
                         <!-- 模块3：缓存管理 -->
                         <div class="indextts-setting-module">
-                            <div class="indextts-module-header">💾 音频缓存管理</div>
+                            <div class="indextts-module-header">🎙️ 参考音频&缓存管理</div>
                              <div class="indextts-path-container">
                                 <input type="text" id="indextts-local-path" class="indextts-path-display" value="${pathDisplay}" readonly title="${pathDisplay}">
                                 <button class="menu_button" id="indextts-choose-folder" title="选择本地文件夹">📂 选择</button>
@@ -2548,6 +3264,39 @@
                                     <button class="menu_button" id="indextts-export-cache" title="导出备份">📂 导出备份</button>
                                     <button class="menu_button" id="indextts-clear-cache" title="清空缓存">🗑️ 清空全部</button>
                                 </div>
+                            </div>
+                        </div>
+
+                        <!-- 模剗4：背景音效 -->
+                        <div class="indextts-setting-module">
+                            <div class="indextts-module-header">🎵 场景音效</div>
+                            <div class="indextts-path-container">
+                                <input type="text" id="indextts-ambient-path" class="indextts-path-display" value="" readonly placeholder="未选择背景音目录">
+                                <button class="menu_button" id="indextts-ambient-choose" title="选择背景音文件夹">📂 选择</button>
+                                <button class="menu_button" id="indextts-ambient-auth" title="重新授权目录读取权限" style="display:none;">🔄 授权</button>
+                            </div>
+                            <div class="indextts-setting-row">
+                                <label>场景音音量</label>
+                                <input type="range" id="indextts-ambient-volume" class="indextts-slider" min="0" max="1" step="0.05" value="${settings.ambientSoundVolume ?? 0.4}">
+                                <span id="indextts-ambient-volume-val">${((settings.ambientSoundVolume ?? 0.4) * 100).toFixed(0)}%</span>
+                            </div>
+                            <div class="indextts-setting-row">
+                                <label>淡入淡出</label>
+                                <select id="indextts-ambient-fade" class="text_pole">
+                                    <option value="0"${(settings.ambientFadeDuration ?? 0) == 0 ? ' selected' : ''}>关闭</option>
+                                    <option value="500"${(settings.ambientFadeDuration ?? 0) == 500 ? ' selected' : ''}>0.5 秒</option>
+                                    <option value="1000"${(settings.ambientFadeDuration ?? 0) == 1000 ? ' selected' : ''}>1 秒</option>
+                                    <option value="1500"${(settings.ambientFadeDuration ?? 0) == 1500 ? ' selected' : ''}>1.5 秒</option>
+                                    <option value="2000"${(settings.ambientFadeDuration ?? 0) == 2000 ? ' selected' : ''}>2 秒</option>
+                                    <option value="3000"${(settings.ambientFadeDuration ?? 0) == 3000 ? ' selected' : ''}>3 秒</option>
+                                </select>
+                            </div>
+                            <div class="indextts-setting-row" style="font-size:0.85em; opacity:0.7;">
+                                音效文件命名需与场景名称一致，支持 .mp3 / .wav / .ogg / .m4a
+                            </div>
+                            <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-ambient-loop-scene">同场景下循环播放场景音</label>
+                                <input type="checkbox" id="indextts-ambient-loop-scene" ${settings.ambientLoopByScene ? 'checked' : ''}>
                             </div>
                         </div>
 
@@ -2577,6 +3326,7 @@
 
         bindInput('#indextts-url', 'apiUrl');
         bindInput('#indextts-clone-url', 'cloningUrl');
+        bindInput('#indextts-voice-list-url', 'voiceListUrl');
         bindInput('#indextts-model', 'model');
 
         // 2. Playback & Automation
@@ -2606,6 +3356,64 @@
         };
         bindCheckbox('#indextts-enable-inline', 'enableInline', true);
         bindCheckbox('#indextts-auto-inference', 'autoInference', false);
+        bindCheckbox('#indextts-auto-play', 'autoPlay', false);
+        bindCheckbox('#indextts-streaming-play', 'streamingPlay', false);
+
+        // 流式推理跳过数量设置
+        const streamingSkipRow = panel.querySelector('#indextts-streaming-skip-row');
+        const streamingSkipCount = panel.querySelector('#indextts-streaming-skip-count');
+        const streamingPlayCheckbox = panel.querySelector('#indextts-streaming-play');
+        const autoPlayCheckbox = panel.querySelector('#indextts-auto-play');
+
+        // 流式推理播放和推理后自动播放互斥逻辑
+        if (streamingPlayCheckbox) {
+            streamingPlayCheckbox.onchange = (e) => {
+                const s = getSettings();
+                if (e.target.checked) {
+                    // 启用流式推理播放时，关闭推理后自动播放
+                    s.streamingPlay = true;
+                    s.autoPlay = false;
+                    // 同时更新 UI 上的自动播放复选框
+                    if (autoPlayCheckbox) autoPlayCheckbox.checked = false;
+                    // 显示跳过数量设置行
+                    if (streamingSkipRow) streamingSkipRow.style.display = '';
+                } else {
+                    s.streamingPlay = false;
+                    // 隐藏跳过数量设置行
+                    if (streamingSkipRow) streamingSkipRow.style.display = 'none';
+                }
+                saveSettings();
+            };
+        }
+
+        // 推理后自动播放和流式推理播放互斥逻辑
+        if (autoPlayCheckbox) {
+            autoPlayCheckbox.onchange = (e) => {
+                const s = getSettings();
+                if (e.target.checked) {
+                    // 启用推理后自动播放时，关闭流式推理播放
+                    s.autoPlay = true;
+                    s.streamingPlay = false;
+                    // 同时更新 UI 上的流式推理播放复选框
+                    if (streamingPlayCheckbox) streamingPlayCheckbox.checked = false;
+                    // 隐藏跳过数量设置行
+                    if (streamingSkipRow) streamingSkipRow.style.display = 'none';
+                } else {
+                    s.autoPlay = false;
+                }
+                saveSettings();
+            };
+        }
+
+        if (streamingSkipCount) {
+            streamingSkipCount.onchange = (e) => {
+                const s = getSettings();
+                const countVal = parseInt(e.target.value) || 1;
+                s.streamingSkipCount = Math.max(1, Math.min(50, countVal));
+                e.target.value = s.streamingSkipCount;
+                saveSettings();
+            };
+        }
 
         // Voice
         const voiceInput = panel.querySelector('#indextts-voice');
@@ -2660,6 +3468,93 @@
         bindPrompt('#indextts-prompt-depth', 'depth');
         bindPrompt('#indextts-prompt-role', 'role');
         bindPrompt('#indextts-prompt-content', 'content');
+
+        // ==================== Module 4: Ambient Sound ====================
+        const ambientChooseBtn = panel.querySelector('#indextts-ambient-choose');
+        if (ambientChooseBtn) {
+            ambientChooseBtn.onclick = async () => {
+                if (!window.showDirectoryPicker) {
+                    if (window.toastr) window.toastr.error('浏览器不支持目录选择');
+                    return;
+                }
+                try {
+                    const h = await window.showDirectoryPicker();
+                    await AmbientPlayer.setDirHandle(h);
+                    // Pre-authorize while still inside user gesture
+                    await AmbientPlayer.requestPermission();
+                    const el = panel.querySelector('#indextts-ambient-path');
+                    if (el) el.value = h.name;
+                    // 同时保存到 settings 作为备用
+                    const s = getSettings();
+                    s.ambientSoundPath = h.name;
+                    saveSettings();
+                    if (window.toastr) window.toastr.success('背景音目录已设置: ' + h.name);
+                } catch (e) {
+                    if (e.name !== 'AbortError') console.error('[IndexTTS2][Ambient]', e);
+                }
+            };
+            // Init display - 优先使用 handle，备用 settings
+            const existingH = AmbientPlayer.getDirHandle();
+            const ambPathEl = panel.querySelector('#indextts-ambient-path');
+            const s = getSettings();
+            if (existingH && ambPathEl) {
+                ambPathEl.value = existingH.name;
+            } else if (s.ambientSoundPath && ambPathEl) {
+                // handle 失效时使用 settings 中的备用路径
+                ambPathEl.value = s.ambientSoundPath;
+            }
+            // Show auth button if handle exists but may need re-authorization
+            // 或者有备用路径但 handle 失效（需要重新选择授权）
+            const ambAuthBtn = panel.querySelector('#indextts-ambient-auth');
+            if (ambAuthBtn) {
+                if (existingH) {
+                    ambAuthBtn.style.display = 'inline-block';
+                } else if (s.ambientSoundPath) {
+                    // 有备用路径但 handle 失效，显示授权按钮
+                    ambAuthBtn.style.display = 'inline-block';
+                }
+                ambAuthBtn.onclick = async () => {
+                    if (existingH) {
+                        const ok = await AmbientPlayer.requestPermission();
+                        if (ok) {
+                            ambAuthBtn.style.display = 'none';
+                            if (window.toastr) window.toastr.success('背景音目录授权成功');
+                        } else {
+                            if (window.toastr) window.toastr.error('授权失败，请重新选择目录');
+                        }
+                    } else if (s.ambientSoundPath) {
+                        // 需要重新选择目录
+                        if (window.toastr) window.toastr.info('请重新选择背景音目录以获取权限');
+                        ambientChooseBtn.click();
+                    }
+                };
+            }
+        }
+        const ambVolSlider = panel.querySelector('#indextts-ambient-volume');
+        if (ambVolSlider) {
+            ambVolSlider.oninput = (e) => {
+                const v = parseFloat(e.target.value);
+                AmbientPlayer.setVolume(v);
+                const disp = panel.querySelector('#indextts-ambient-volume-val');
+                if (disp) disp.textContent = Math.round(v * 100) + '%';
+            };
+        }
+        const ambFadeSelect = panel.querySelector('#indextts-ambient-fade');
+        if (ambFadeSelect) {
+            ambFadeSelect.onchange = (e) => {
+                const s = getSettings();
+                s.ambientFadeDuration = parseInt(e.target.value) || 0;
+                saveSettings();
+            };
+        }
+        const ambLoopSceneChk = panel.querySelector('#indextts-ambient-loop-scene');
+        if (ambLoopSceneChk) {
+            ambLoopSceneChk.onchange = (e) => {
+                const s = getSettings();
+                s.ambientLoopByScene = e.target.checked;
+                saveSettings();
+            };
+        }
 
         // ==================== Module 3: Audio Cache Management ====================
         const pathInputEl = panel.querySelector('#indextts-local-path');
@@ -3051,6 +3946,11 @@
                                 if (msg) {
                                     console.log('[IndexTTS2] Auto-inferring for message', mesId);
                                     await inferMessageAudios(msg, null, true); // silent = true
+                                    // 自动播放：流式推理播放模式下已在 inferMessageAudios 内部处理
+                                    // 非流式模式下，仅当启用"推理后自动播放"时调用
+                                    if (settings.autoPlay) {
+                                        await autoPlayMessage(msg);
+                                    }
                                 }
                             }
                         }, 500);
@@ -3147,6 +4047,7 @@
         const loadedSettings = getSettings(); // Ensure settings exist
         console.log('[IndexTTS2] Loaded settings:', loadedSettings);
         LocalRepo.init();
+        AmbientPlayer.init();
         setupEventListeners();
         setInterval(polling, 2000);
         polling(); // Initial run
