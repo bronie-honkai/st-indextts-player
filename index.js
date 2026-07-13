@@ -1749,23 +1749,10 @@
         miniPlayerToggle.disabled = false;
 
         const timeUpdate = () => {
-            if (isGlobal && currentPlayback.playlist) {
-                // Global Progress
-                const currentItem = currentPlayback.playlist[currentPlayback.index];
-                if (currentItem) {
-                    const elapsed = currentItem.startOffset + audio.currentTime;
-                    const total = currentPlayback.totalDuration || 1;
-                    const percent = Math.min(1, Math.max(0, elapsed / total));
-                    miniPlayerProgress.value = Math.floor(percent * 1000);
-                    // Update CSS variable for "played" portion if custom styling needed (optional)
-                    miniPlayerProgress.style.setProperty('--value', `${percent * 100}%`);
-                }
-            } else {
-                // Single File Progress
-                if (!isFinite(audio.duration) || !audio.duration) return;
-                const percent = audio.currentTime / audio.duration;
-                miniPlayerProgress.value = Math.floor(percent * 1000);
-            }
+            // Single File Progress（合并播放后不再有多段 playlist，统一走此分支）
+            if (!isFinite(audio.duration) || !audio.duration) return;
+            const percent = audio.currentTime / audio.duration;
+            miniPlayerProgress.value = Math.floor(percent * 1000);
         };
 
         const updateToggle = () => {
@@ -2308,179 +2295,181 @@
             }
             clearPlayingInMessage(currentPlayback.msg);
 
-            const playlist = [];
-            let totalDuration = 0;
+            // ── 解码辅助：把单段 blobUrl 解码为 AudioBuffer ──
+            const decodeToAudioBuffer = async (blobUrl, audioContext) => {
+                const resp = await fetch(blobUrl);
+                const arrayBuffer = await resp.arrayBuffer();
+                return await audioContext.decodeAudioData(arrayBuffer);
+            };
 
-            // Helper to load duration
-            const loadDuration = (blobUrl) => new Promise((resolve) => {
-                const a = new Audio(blobUrl);
-                a.onloadedmetadata = () => resolve(a.duration);
-                a.onerror = () => resolve(0);
-                // Timeout fallback
-                setTimeout(() => resolve(0), 1000);
-            });
+            // ── 合并：把多段 AudioBuffer 渲染成一个连续的 AudioBuffer ──
+            const mergeAudioBuffers = async (buffers) => {
+                const sampleRate = buffers[0].sampleRate;
+                const numChannels = Math.max(...buffers.map(b => b.numberOfChannels));
+                const totalLength = buffers.reduce((sum, b) => sum + b.length, 0);
 
-            for (let i = 0; i < queue.length; i++) {
-                const item = queue[i];
-                const dur = await loadDuration(item.blobUrl);
-                playlist.push({
-                    ...item,
-                    index: i,
-                    duration: dur,
-                    startOffset: totalDuration
-                });
-                totalDuration += dur;
-            }
+                const offlineCtx = new OfflineAudioContext(numChannels, totalLength, sampleRate);
+                let offset = 0;
+                const boundaries = [];
 
-            if (totalDuration === 0) {
-                if (window.toastr) window.toastr.error('音频时长获取失败');
+                for (const buf of buffers) {
+                    const source = offlineCtx.createBufferSource();
+                    source.buffer = buf;
+                    source.connect(offlineCtx.destination);
+                    const startTime = offset / sampleRate;
+                    source.start(startTime);
+                    boundaries.push({ start: startTime, end: startTime + buf.duration });
+                    offset += buf.length;
+                }
+
+                const merged = await offlineCtx.startRendering();
+                return { merged, boundaries };
+            };
+
+            // ── 总入口：解码所有分段、合并、转 WAV Blob ──
+            const buildMergedPlaylist = async (queueItems) => {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                try {
+                    const buffers = [];
+                    for (const item of queueItems) {
+                        const buf = await decodeToAudioBuffer(item.blobUrl, audioContext);
+                        buffers.push(buf);
+                    }
+                    const { merged, boundaries } = await mergeAudioBuffers(buffers);
+                    const wavBlob = audioBufferToWav(merged); // 复用文件里已有的函数
+                    const mergedBlobUrl = URL.createObjectURL(wavBlob);
+                    const lineTimeline = queueItems.map((item, i) => ({
+                        text: item.text,
+                        character: item.character,
+                        start: boundaries[i].start,
+                        end: boundaries[i].end,
+                    }));
+                    return { mergedBlobUrl, lineTimeline, totalDuration: merged.duration };
+                } finally {
+                    audioContext.close();
+                }
+            };
+
+            // ── 解码 + 合并所有分段 ──
+            const { mergedBlobUrl, lineTimeline, totalDuration } = await buildMergedPlaylist(queue);
+
+            if (!totalDuration || totalDuration <= 0) {
+                if (window.toastr) window.toastr.error('音频合并失败，时长为 0');
                 return;
             }
 
-            // 2. Setup Global Controller
+            // 2. 创建单个合并音频元素
             const settings = getSettings();
-            let currentIndex = 0;
-            let currentAudio = null;
-
-            // Create unique session ID
             const currentQueueId = Date.now();
             currentPlayback.sessionId = currentQueueId;
 
-            const playTrack = (index, seekTime = 0) => {
-                // Session Check
-                if (currentPlayback.sessionId !== currentQueueId) return;
+            const audio = new Audio(mergedBlobUrl);
 
-                if (index >= playlist.length) {
-                    // Reset or Stop
-                    currentPlayback.stop();
-                    clearPlayingInMessage(msg);
-                    return;
-                }
+            // Volume & Speed
+            const vol = parseFloat(settings.volume || 1.0);
+            audio.volume = Math.max(0, Math.min(1, vol));
+            audio.playbackRate = parseFloat(settings.speed || 1.0);
 
-                currentIndex = index;
-                const item = playlist[index];
+            // 写入 currentPlayback（playlist 恒为 null，不再需要）
+            currentPlayback.audio = audio;
+            currentPlayback.msg = msg;
+            currentPlayback.mesId = mesId;
+            currentPlayback.playlist = null;
+            currentPlayback.totalDuration = totalDuration;
 
-                // Cleanup prev
-                if (currentAudio) {
-                    currentAudio.pause();
-                    currentAudio.onended = null;
-                    currentAudio.onerror = null;
-                    if (currentAudio._indexttsTimeUpdate) currentAudio.removeEventListener('timeupdate', currentAudio._indexttsTimeUpdate);
-                    currentAudio.src = ''; // help GC
-                }
-
-                const audio = new Audio(item.blobUrl);
-                currentAudio = audio;
-
-                // Globals
-                currentPlayback.audio = audio;
-                currentPlayback.msg = msg;
-                currentPlayback.mesId = mesId;
-                currentPlayback.index = index;
-                currentPlayback.playlist = playlist;
-                currentPlayback.totalDuration = totalDuration;
-
-                // Volume & Speed
-                const vol = parseFloat(settings.volume || 1.0);
-                audio.volume = Math.max(0, Math.min(1, vol));
-                audio.playbackRate = parseFloat(settings.speed || 1.0);
-
-                // Seek if needed
-                if (seekTime > 0) {
-                    audio.currentTime = seekTime;
-                }
-
-                // UI Highlight
-                const encT = utf8ToBase64(item.text);
-                const encC = utf8ToBase64(item.character || '');
-                clearPlayingInMessage(msg);
-                setLinePlayingByEncoded(msg, encT, encC, true);
-
-                // Update Floater UI Info
-                const avatarEl = msg.querySelector('.avatar img');
-                let displayChar = item.character || 'Unknown';
+            // 初始化浮窗信息（用第一句台词）
+            const avatarEl = msg.querySelector('.avatar img');
+            const firstLine = lineTimeline[0];
+            if (firstLine) {
+                let displayChar = firstLine.character || 'Unknown';
                 if (displayChar.toLowerCase() === 'narrator' && avatarEl) {
-                    // Try to extract root character if narrator
                     const nameEl = msg.querySelector('.ch_name');
                     if (nameEl) displayChar = nameEl.textContent.trim();
                 }
-
                 TTSPlayerWindow.updateInfo({
                     name: displayChar,
-                    text: item.text,
+                    text: firstLine.text,
                     avatarUrl: avatarEl ? avatarEl.src : null
                 });
+            }
 
-                // Bind Mini Player & Floater (Global Mode)
-                attachMiniPlayerToAudio(audio, true);
+            // 台词高亮：用 lineTimeline 找当前时间对应的句子
+            let lastHighlightIndex = -1;
+            audio.addEventListener('timeupdate', () => {
+                const t = audio.currentTime;
+                const idx = lineTimeline.findIndex(l => t >= l.start && t < l.end);
+                if (idx !== -1 && idx !== lastHighlightIndex) {
+                    if (lastHighlightIndex !== -1) {
+                        const prev = lineTimeline[lastHighlightIndex];
+                        setLinePlayingByEncoded(msg, utf8ToBase64(prev.text), utf8ToBase64(prev.character || ''), false);
+                    }
+                    const curr = lineTimeline[idx];
+                    setLinePlayingByEncoded(msg, utf8ToBase64(curr.text), utf8ToBase64(curr.character || ''), true);
+                    lastHighlightIndex = idx;
 
-                // Hook floater UI updates into audio playback
-                audio.addEventListener('timeupdate', () => {
-                    const elapsed = item.startOffset + audio.currentTime;
-                    // Ensure the duration doesn't jump arbitrarily to 0 during segment shifts
-                    TTSPlayerWindow.updateProgress(elapsed, totalDuration);
-                });
-                audio.addEventListener('play', () => TTSPlayerWindow.updatePlayState(true));
-                audio.addEventListener('pause', () => TTSPlayerWindow.updatePlayState(false));
+                    // 更新浮窗台词信息
+                    let displayChar = curr.character || 'Unknown';
+                    if (displayChar.toLowerCase() === 'narrator' && avatarEl) {
+                        const nameEl = msg.querySelector('.ch_name');
+                        if (nameEl) displayChar = nameEl.textContent.trim();
+                    }
+                    TTSPlayerWindow.updateInfo({
+                        name: displayChar,
+                        text: curr.text,
+                        avatarUrl: avatarEl ? avatarEl.src : null
+                    });
+                }
+                // 全局进度条
+                TTSPlayerWindow.updateProgress(t, totalDuration);
+            });
+            audio.addEventListener('play',  () => TTSPlayerWindow.updatePlayState(true));
+            audio.addEventListener('pause', () => TTSPlayerWindow.updatePlayState(false));
 
-                // Events
-                audio.onended = () => {
-                    setLinePlayingByEncoded(msg, encT, encC, false);
-                    playTrack(index + 1);
-                };
-                audio.onerror = () => {
-                    console.error('[IndexTTS2] Track error');
-                    playTrack(index + 1);
-                };
+            // 播放结束：清理高亮、释放 Blob URL
+            audio.addEventListener('ended', () => {
+                if (lastHighlightIndex !== -1) {
+                    const last = lineTimeline[lastHighlightIndex];
+                    setLinePlayingByEncoded(msg, utf8ToBase64(last.text), utf8ToBase64(last.character || ''), false);
+                }
+                clearPlayingInMessage(msg);
+                URL.revokeObjectURL(mergedBlobUrl);
+            });
 
-                audio.play().catch(e => {
-                    console.error('[IndexTTS2] Auto-play block?', e);
-                    playTrack(index + 1);
-                });
-            };
+            // 绑定迷你播放器（现在 isGlobal 时也走单文件进度分支）
+            attachMiniPlayerToAudio(audio, false);
 
+            // Controller 对外接口保持不变，内部大幅简化
             const controller = {
                 seek: (percent) => {
-                    const targetTime = totalDuration * percent;
-                    // Find segment
-                    let targetIndex = 0;
-                    let offsetInTrack = 0;
-
-                    for (let i = 0; i < playlist.length; i++) {
-                        const track = playlist[i];
-                        if (targetTime >= track.startOffset && targetTime < (track.startOffset + track.duration)) {
-                            targetIndex = i;
-                            offsetInTrack = targetTime - track.startOffset;
-                            break;
-                        }
-                    }
-                    // Handle edge case (100%)
-                    if (percent >= 0.99) {
-                        targetIndex = playlist.length - 1;
-                        offsetInTrack = playlist[targetIndex].duration - 0.1;
-                    }
-
-                    if (targetIndex === currentIndex && currentAudio) {
-                        currentAudio.currentTime = offsetInTrack;
-                    } else {
-                        playTrack(targetIndex, offsetInTrack);
+                    audio.currentTime = Math.min(
+                        percent * audio.duration,
+                        audio.duration - 0.05
+                    );
+                },
+                pause: () => audio.pause(),
+                play:  () => audio.play(),
+                next: () => {
+                    if (lastHighlightIndex !== -1 && lastHighlightIndex < lineTimeline.length - 1) {
+                        audio.currentTime = lineTimeline[lastHighlightIndex + 1].start;
                     }
                 },
-                pause: () => {
-                    if (currentAudio) currentAudio.pause();
+                prev: () => {
+                    if (lastHighlightIndex > 0) {
+                        audio.currentTime = lineTimeline[lastHighlightIndex - 1].start;
+                    }
                 },
-                play: () => {
-                    if (currentAudio) currentAudio.play();
-                }
             };
 
             currentPlayback.controller = controller;
 
-            // Show Floating Player
+            // 显示浮窗播放器
             TTSPlayerWindow.show(msg, controller);
 
-            // Start
-            playTrack(0);
+            // 开始播放
+            audio.play().catch(e => {
+                console.error('[IndexTTS2] 合并播放启动失败:', e);
+                if (window.toastr) window.toastr.error('自动播放被拦截，请点击播放按钮');
+            });
 
         })().catch(e => {
             console.error('[IndexTTS2] playMessageQueue error:', e);
