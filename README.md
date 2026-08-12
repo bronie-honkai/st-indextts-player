@@ -1,4 +1,4 @@
-# ST-IndexTTS Player v2.0.0 最新更新速览（2026-08-12）
+﻿# ST-IndexTTS Player v2.0.0 最新更新速览（2026-08-12）
 
 - 项目名称统一为 `st-indextts-player`，兼容 IndexTTS 2.0 与 IndexTTS-2.5。
 - 保留内部设置键 `st-indextts2`，确保已有 SillyTavern 配置平滑迁移。
