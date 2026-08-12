@@ -2,6 +2,97 @@
     const extensionName = "st-indextts2";
     const extensionFolderPath = `scripts/extensions/third-party/${extensionName}/`;
 
+    const LEGACY_OTHER_DUB_PROMPTS = {
+        JA: `你正在为角色对话补充{{TARGET_LANGUAGE}}配音。\n保持原有角色、服装、表情、八维情感向量和中文台词格式不变。每句需要配音的台词后，必须紧接一行：\n@VOICE-{{LANG_CODE}}: 自然、符合角色身份和情绪的{{TARGET_LANGUAGE}}台词\n配音行必须与上一句一一对应，中间不得插入空行。不得加入翻译说明、罗马音、脚注或无关内容。人名、地名及容易误读的专有名词可以使用IndexTTS-2.5发音标注<文字|发音>。`,
+        EN: `你正在为角色对话补充{{TARGET_LANGUAGE}}配音。\n保持原有角色、服装、表情、八维情感向量和中文台词格式不变。每句需要配音的台词后，必须紧接一行：\n@VOICE-{{LANG_CODE}}: 自然、符合角色身份和情绪的{{TARGET_LANGUAGE}}台词\n配音行必须与上一句一一对应，中间不得插入空行。不得加入翻译说明、音标、脚注或无关内容。`,
+        ES: `你正在为角色对话补充{{TARGET_LANGUAGE}}配音。\n保持原有角色、服装、表情、八维情感向量和中文台词格式不变。每句需要配音的台词后，必须紧接一行：\n@VOICE-{{LANG_CODE}}: 自然、符合角色身份和情绪的{{TARGET_LANGUAGE}}台词\n配音行必须与上一句一一对应，中间不得插入空行。不得加入翻译说明、音标、脚注或无关内容。`,
+        AR: `你正在为角色对话补充{{TARGET_LANGUAGE}}配音。\n保持原有角色、服装、表情、八维情感向量和中文台词格式不变。每句需要配音的台词后，必须紧接一行：\n@VOICE-{{LANG_CODE}}: 自然、符合角色身份和情绪的{{TARGET_LANGUAGE}}台词\n配音行必须与上一句一一对应，中间不得插入空行。不得加入翻译说明、转写、脚注或无关内容。`,
+    };
+
+    const buildOtherDubPromptV1 = (example) => `<OTHER_COUNTRY_DUBBING_INSTRUCTIONS>
+你正在为角色对话生成他国语音配音文本。
+
+目标配音语言：{{TARGET_LANGUAGE}}
+配音语言代码：{{LANG_CODE}}
+
+继续严格遵守原有角色对话、服装、表情和八维情感向量格式。每句需要配音的中文台词之后，必须紧接一行对应的目标语言配音文本：
+
+[角色名|服装|表情][八维情感向量]|「中文原文」
+@VOICE-{{LANG_CODE}}: 目标语言配音文本
+
+示例：
+
+[神尾观铃|校服|微笑][0.3,0,0,0,0,0,0,0.5]|「你会带观铃去那个地方吗？」
+@VOICE-{{LANG_CODE}}: ${example}
+
+严格规则：
+
+1. 中文原文继续使用原有格式，不得改变现有角色、服装、表情和情感向量结构。
+2. 每句需要配音的台词后必须紧接一行\`@VOICE-{{LANG_CODE}}:\`。
+3. 配音行必须与它上方最近的一句台词一一对应，中间不得插入空行、旁白或其他内容。
+4. 配音文本应忠实表达原文含义，并符合角色的年龄、身份、性格、情绪和说话习惯。
+5. 不得机械逐字翻译，应使用自然的目标语言表达。
+6. 配音行中不得加入翻译说明、罗马音、脚注或无关解释。
+7. 不得在正文其他位置重复配音文本。
+8. 配音行可以使用IndexTTS-2.5官方发音标注\`<文字|发音>\`，用于人名、地名和容易误读的专有名词。
+9. 发音标注只能出现在\`@VOICE-{{LANG_CODE}}:\`行中。
+10. 如果某行不是需要朗读的台词，则不要生成对应的配音行。
+</OTHER_COUNTRY_DUBBING_INSTRUCTIONS>`;
+
+    const PREVIOUS_OTHER_DUB_PROMPTS = {
+        JA: buildOtherDubPromptV1('その場所に、<観鈴|みすず>を連れていってくれる？'),
+        EN: buildOtherDubPromptV1('Will you take Misuzu to that place?'),
+        ES: buildOtherDubPromptV1('¿Me llevarás a Misuzu a ese lugar?'),
+        AR: buildOtherDubPromptV1('هل ستأخذ ميسوزو إلى ذلك المكان؟'),
+    };
+
+    const buildOtherDubPrompt = (example) => `<OTHER_COUNTRY_DUBBING_INSTRUCTIONS>
+你正在为角色对话生成他国语音配音文本。
+
+目标配音语言：{{TARGET_LANGUAGE}}
+配音语言代码：{{LANG_CODE}}
+
+继续严格遵守原有角色对话、服装、表情和八维情感向量格式。每句需要配音的中文台词之后，必须紧接一行对应的目标语言配音文本：
+
+[角色名|服装|表情][八维情感向量]|「中文原文」
+@VOICE-{{LANG_CODE}}: 目标语言配音文本
+
+示例：
+
+[神尾观铃|校服|微笑][0.3,0,0,0,0,0,0,0.5]|「你会带观铃去那个地方吗？」
+@VOICE-{{LANG_CODE}}: ${example}
+
+【IndexTTS-2.5 发音标注规则（必须执行）】
+
+- 发音标注的唯一格式是 \`<文字|发音>\`：竖线左边写配音文本中原本要显示的文字，竖线右边写 TTS 实际必须读出的目标语言发音。
+- 这不是解释、译注或罗马音注释；它是给 TTS 的强制读音指令。输出后，TTS 会显示并朗读左边的文字，但按右边的发音读出。
+- 每个角色的人名、地名、作品名、组织名、昵称、罕见词，以及存在多种读法或可能误读的词，**必须主动**使用发音标注；不要等待用户要求。
+- 对于日语：汉字姓名和专有名词的右侧必须写正确的假名读音（平假名或片假名），禁止写罗马字。例如 \`<観鈴|みすず>\`、\`<名雪|なゆき>\`、\`<月宮|つきみや>\`。
+- 对于其他目标语言：右侧写该目标语言中实际应被朗读的读音；只有发音确实需要纠正时才标注普通词，不要给整句每个普通词滥加标注。
+- 同一个专有名词在每一条 \`@VOICE-{{LANG_CODE}}:\` 配音行中出现时，都要重复保留其发音标注，不能只在第一次出现时标一次。
+- 发音标注只能写在 \`@VOICE-{{LANG_CODE}}:\` 行内，绝不能写入中文原文行、旁白、括号说明或正文其他位置。
+
+严格规则：
+
+1. 中文原文继续使用原有格式，不得改变现有角色、服装、表情和情感向量结构。
+2. 每句需要配音的台词后必须紧接一行\`@VOICE-{{LANG_CODE}}:\`。
+3. 配音行必须与它上方最近的一句台词一一对应，中间不得插入空行、旁白或其他内容。
+4. 配音文本应忠实表达原文含义，并符合角色的年龄、身份、性格、情绪和说话习惯。
+5. 不得机械逐字翻译，应使用自然的目标语言表达。
+6. 配音行中不得加入翻译说明、罗马音、脚注或无关解释；发音标注中的右侧读音不属于罗马音说明。
+7. 不得在正文其他位置重复配音文本。
+8. 如果配音行含有人名、地名、作品名、组织名、昵称、罕见词或易误读词，必须按上方规则输出\`<文字|发音>\`，不得省略。
+9. 发音标注只能出现在\`@VOICE-{{LANG_CODE}}:\`行中。
+10. 如果某行不是需要朗读的台词，则不要生成对应的配音行。
+</OTHER_COUNTRY_DUBBING_INSTRUCTIONS>`;
+
+    const OTHER_DUB_LANGUAGES = {
+        JA: { name: '日语', prompt: buildOtherDubPrompt('その場所に、<観鈴|みすず>を連れていってくれる？') },
+        EN: { name: '英语', prompt: buildOtherDubPrompt('Will you take Misuzu to that place?') },
+        ES: { name: '西班牙语', prompt: buildOtherDubPrompt('¿Me llevarás a Misuzu a ese lugar?') },
+        AR: { name: '阿拉伯语', prompt: buildOtherDubPrompt('هل ستأخذ ميسوزو إلى ذلك المكان؟') },
+    };
+
     // ==================== Default Settings ====================
     const defaultSettings = {
         apiUrl: 'http://127.0.0.1:7880/v1/audio/speech',
@@ -9,6 +100,9 @@
         model: 'index-tts2',
         defaultVoice: 'default.wav',
         speed: 1.0,
+        durationFactor: 1.0,
+        emoAlpha: 0.6,
+        useRandom: false,
         volume: 1.0,
         parsingMode: 'gal', // 'gal' | 'audiobook'
         enableInline: true, // 启用行内增强渲染
@@ -16,7 +110,6 @@
         cacheImportPath: '\\\\SillyTavern\\\\data\\\\TTSsound',
         // VN format: [角色|表情]|「对话」 or [旁白]|描述
         vnRegex: '^\\[([^\\]|]+)(?:\\|[^\\]]*)?\\]\\|(.+)$',
-        voiceMap: {}, // { cardId: { characterName: "voice.wav" } }
         // 输出正则过滤：在文本进入 TTS 处理流程前，按顺序执行正则替换
         regexFilters: [
             { enabled: true, regex: '/<think>[\\s\\S]*?<\\/think>\\n?/g', replacement: '' }
@@ -43,6 +136,13 @@
             position: "depth",
             depth: 4,
             role: "system"
+        },
+        otherCountryDubbing: {
+            enabled: false,
+            language: "JA",
+            depth: 4,
+            role: "system",
+            prompts: Object.fromEntries(Object.entries(OTHER_DUB_LANGUAGES).map(([code, item]) => [code, item.prompt]))
         }
     };
 
@@ -92,6 +192,45 @@
         return target;
     }
 
+    function ensureVoiceProfileRoot(root) {
+        let changed = false;
+        if (!root.voiceProfiles || typeof root.voiceProfiles !== 'object') {
+            root.voiceProfiles = {};
+            changed = true;
+        }
+
+        // 将旧结构“播放器预设 → 角色卡 → 音色表”迁移为
+        // “角色卡 → 可命名配音配置 → 音色表”。旧播放器预设名直接作为配音配置名。
+        for (const [presetName, preset] of Object.entries(root.presets || {})) {
+            if (!preset?.voiceMap || typeof preset.voiceMap !== 'object') continue;
+            for (const [cardId, characterMap] of Object.entries(preset.voiceMap)) {
+                if (!characterMap || typeof characterMap !== 'object' || Array.isArray(characterMap)) continue;
+                if (!root.voiceProfiles[cardId]) {
+                    root.voiceProfiles[cardId] = { selected: '', configs: {} };
+                }
+                const cardStore = root.voiceProfiles[cardId];
+                if (!cardStore.configs || typeof cardStore.configs !== 'object') cardStore.configs = {};
+                if (!cardStore.configs[presetName]) {
+                    cardStore.configs[presetName] = JSON.parse(JSON.stringify(characterMap));
+                }
+                if (!cardStore.selected || presetName === root.selected_preset) cardStore.selected = presetName;
+            }
+            delete preset.voiceMap;
+            changed = true;
+        }
+
+        for (const cardStore of Object.values(root.voiceProfiles)) {
+            if (!cardStore || typeof cardStore !== 'object') continue;
+            if (!cardStore.configs || typeof cardStore.configs !== 'object') cardStore.configs = {};
+            const names = Object.keys(cardStore.configs);
+            if (!cardStore.selected || !cardStore.configs[cardStore.selected]) {
+                cardStore.selected = names[0] || '默认配音';
+            }
+            if (!cardStore.configs[cardStore.selected]) cardStore.configs[cardStore.selected] = {};
+        }
+        return changed;
+    }
+
     function getSettings() {
         // ========== 第一步：从 Context（唯一真理来源）读取 ==========
         const ctx = getContext();
@@ -132,7 +271,20 @@
         const active = root.presets[root.selected_preset];
         // 使用深度合并补齐所有缺失字段（包括 promptInjection、vnRegex 等子对象）
         deepMergeDefaults(active, defaultSettings);
-        if (typeof active.voiceMap !== 'object') active.voiceMap = {};
+        const voiceProfilesMigrated = ensureVoiceProfileRoot(root);
+        // 仅迁移上一版内置的短提示词；用户自行编辑过的内容保持原样。
+        const dubPrompts = active.otherCountryDubbing?.prompts;
+        if (dubPrompts && typeof dubPrompts === 'object') {
+            for (const [code, legacyPrompt] of Object.entries(LEGACY_OTHER_DUB_PROMPTS)) {
+                if (!dubPrompts[code] || dubPrompts[code] === legacyPrompt || dubPrompts[code] === PREVIOUS_OTHER_DUB_PROMPTS[code]) {
+                    dubPrompts[code] = OTHER_DUB_LANGUAGES[code].prompt;
+                }
+            }
+        }
+        if (voiceProfilesMigrated) {
+            if (typeof ctx?.saveSettingsDebounced === 'function') ctx.saveSettingsDebounced();
+            else if (typeof ctx?.saveSettings === 'function') ctx.saveSettings();
+        }
 
         return active;
     }
@@ -188,12 +340,7 @@
             injectSettingsPanel();
         }
 
-        // 如果配音弹窗正在打开，也重绘
-        const modalEl = document.getElementById('indextts-modal');
-        if (modalEl) {
-            modalEl.remove();
-            showConfigPopup();
-        }
+        // 配音配置属于角色卡，不跟随播放器预设切换，因此不重绘配音弹窗。
     }
 
     function getCardId() {
@@ -224,13 +371,28 @@
         return '默认';
     }
 
-    function getVoiceMap() {
-        const settings = getSettings();
+    function getVoiceCardStore() {
+        const root = getRootSettings();
+        ensureVoiceProfileRoot(root);
         const cardId = getCardId();
-        if (!settings.voiceMap[cardId]) {
-            settings.voiceMap[cardId] = {};
+        if (!root.voiceProfiles[cardId]) {
+            root.voiceProfiles[cardId] = {
+                selected: '默认配音',
+                configs: { '默认配音': {} },
+            };
         }
-        return settings.voiceMap[cardId];
+        const cardStore = root.voiceProfiles[cardId];
+        if (!cardStore.configs || typeof cardStore.configs !== 'object') cardStore.configs = {};
+        if (!cardStore.selected || !cardStore.configs[cardStore.selected]) {
+            cardStore.selected = Object.keys(cardStore.configs)[0] || '默认配音';
+        }
+        if (!cardStore.configs[cardStore.selected]) cardStore.configs[cardStore.selected] = {};
+        return cardStore;
+    }
+
+    function getVoiceMap() {
+        const cardStore = getVoiceCardStore();
+        return cardStore.configs[cardStore.selected];
     }
 
     function ensureWavSuffix(filename) {
@@ -522,9 +684,19 @@
         return { init, setHandle, getHandle, requestPermission };
     })();
 
-    async function generateHash(character, voiceId, text, speed, volume, emotion) {
+    async function generateHash(character, voiceId, text, speed, volume, emotion, requestMeta = null) {
         const emotionPart = emotion ? `|${emotion}` : '';
-        const input = `${character || ''}|${voiceId || ''}|${speed}|${volume}|${text || ''}${emotionPart}`;
+        // 中文旧格式维持原缓存键；他国配音才加入语言和2.5生成参数，避免中外语串缓存。
+        const hasNonDefaultMeta = requestMeta && (
+            requestMeta.lang !== 'ZH' ||
+            Number(requestMeta.durationFactor) !== 1 ||
+            Number(requestMeta.emoAlpha) !== 0.6 ||
+            requestMeta.useRandom === true
+        );
+        const metaPart = hasNonDefaultMeta
+            ? `|${requestMeta.lang}|${requestMeta.durationFactor}|${requestMeta.emoAlpha}|${requestMeta.useRandom ? 1 : 0}`
+            : '';
+        const input = `${character || ''}|${voiceId || ''}|${speed}|${volume}|${text || ''}${emotionPart}${metaPart}`;
         try {
             const encoder = new TextEncoder();
             const data = encoder.encode(input);
@@ -692,6 +864,51 @@
         return null;
     }
 
+    const VOICE_LINE_REGEX = /^@VOICE-([A-Z]{2}):\s*(.+)$/i;
+
+    function getRawMessageText(msg) {
+        try {
+            const mesId = getMessageId(msg);
+            const ctx = getContext();
+            const entry = ctx?.chat?.[parseInt(mesId, 10)];
+            if (entry && typeof entry.mes === 'string') return entry.mes;
+        } catch (e) {
+            console.warn('[IndexTTS2] raw message lookup failed:', e);
+        }
+        return msg?.querySelector('.mes_text')?.innerText || '';
+    }
+
+    function parseMessageVoicePairs(text, settings = getSettings()) {
+        const lines = (text || '').replace(/\r/g, '').split('\n');
+        const results = [];
+        const dubbing = settings.otherCountryDubbing || {};
+        const targetLang = String(dubbing.language || 'JA').toUpperCase();
+
+        for (let i = 0; i < lines.length; i++) {
+            const original = lines[i].trim();
+            if (!original || VOICE_LINE_REGEX.test(original)) continue;
+            const parsed = parseVNLine(original);
+            if (!parsed) continue;
+
+            let dubbedText = '';
+            const nextLine = (lines[i + 1] || '').trim();
+            const voiceMatch = nextLine.match(VOICE_LINE_REGEX);
+            if (voiceMatch && voiceMatch[1].toUpperCase() === targetLang) {
+                dubbedText = voiceMatch[2].trim();
+            }
+
+            results.push({
+                original,
+                parsed,
+                displayText: parsed.dialogue,
+                ttsText: dubbing.enabled && dubbedText ? dubbedText : parsed.dialogue,
+                lang: dubbing.enabled && dubbedText ? targetLang : 'ZH',
+                hasDubbing: !!dubbedText,
+            });
+        }
+        return results;
+    }
+
     // ==================== Regex Filter Engine ====================
     /**
      * 解析字符串格式的正则表达式（如 /pattern/flags）并创建 RegExp 对象
@@ -774,7 +991,7 @@
     }
 
     // ==================== TTS API & Cache Flow ====================
-    async function ensureAudioRecord({ text, character, voice, allowFetch = true, emotion = null }) {
+    async function ensureAudioRecord({ text, character, voice, allowFetch = true, emotion = null, lang = 'ZH' }) {
         if (!text?.trim()) return null;
         const settings = getSettings();
         // Use default voice if specific voice not set, UNLESS we want to be strict (but ensureAudioRecord is usually for playback).
@@ -782,7 +999,12 @@
         const normVoice = ensureWavSuffix(voice || settings.defaultVoice);
         const speed = parseFloat(settings.speed || 1.0) || 1.0;
         const volume = parseFloat(settings.volume || 1.0) || 1.0;
-        const hash = await generateHash(character || 'Unknown', normVoice, text, speed, volume, emotion);
+        const durationFactor = parseFloat(settings.durationFactor || 1.0) || 1.0;
+        const emoAlpha = parseFloat(settings.emoAlpha ?? 0.6);
+        const useRandom = settings.useRandom === true;
+        const normalizedLang = String(lang || 'ZH').toUpperCase();
+        const requestMeta = { lang: normalizedLang, durationFactor, emoAlpha, useRandom };
+        const hash = await generateHash(character || 'Unknown', normVoice, text, speed, volume, emotion, requestMeta);
 
         // 先查 IndexedDB 缓存
         try {
@@ -816,13 +1038,18 @@
             voice: normVoice,
             response_format: 'wav',
             speed: speed,
+            duration_factor: durationFactor,
+            lang: normalizedLang,
+            emo_alpha: emoAlpha,
+            use_random: useRandom,
         };
         if (emotion) {
             const emoVec = emotion.split(',').map(v => parseFloat(v.trim()));
             if (emoVec.length === 8 && emoVec.every(v => !isNaN(v))) {
                 payload.emo_control_method = 2;
                 payload.emo_vec = emoVec;
-                payload.emo_weight = 0.6;
+                payload.emo_weight = emoAlpha;
+                payload.emo_vector = emoVec;
             }
         }
 
@@ -874,6 +1101,7 @@
         // Explicitly check for false, default to true
         const allowFetch = ctx.autoInfer === false ? false : true;
         const emotion = ctx.emotion || null;
+        const lang = String(ctx.lang || 'ZH').toUpperCase();
         let msg = ctx.msg || null;
         const encT = ctx.encT || utf8ToBase64(text);
         const encC = ctx.encC || utf8ToBase64(character || '');
@@ -912,7 +1140,7 @@
 
         let record;
         try {
-            record = await ensureAudioRecord({ text, character, voice: finalVoice, allowFetch, emotion });
+            record = await ensureAudioRecord({ text, character, voice: finalVoice, allowFetch, emotion, lang });
             if (!record) return;
         } catch (e) {
             if (window.toastr) window.toastr.error('TTS失败: ' + e.message);
@@ -1032,8 +1260,8 @@
     function showConfigPopup() {
         const cardId = getCardId();
         const cardName = getCardName();
-        const settings = getSettings();
-        const voiceMap = getVoiceMap();
+        const cardStore = getVoiceCardStore();
+        let voiceMap = getVoiceMap();
 
         const renderListResults = () => {
             const characters = getMergedCharacterList();
@@ -1075,11 +1303,11 @@
                 <div class="indextts-popup-header"><h3>🎙️ 配音配置 - ${cardName}</h3></div>
                 <div class="indextts-preset-bar-popup">
                     <select id="indextts-popup-preset-select" class="text_pole"></select>
-                    <input type="text" id="indextts-popup-preset-name" class="text_pole" placeholder="预设名称">
-                    <div id="indextts-popup-preset-save" class="menu_button" title="保存/新建预设">
+                    <input type="text" id="indextts-popup-preset-name" class="text_pole" placeholder="配音配置名称">
+                    <div id="indextts-popup-preset-save" class="menu_button" title="保存/新建配音配置">
                         <i class="fa-solid fa-floppy-disk"></i>
                     </div>
-                    <div id="indextts-popup-preset-delete" class="menu_button" title="删除预设">
+                    <div id="indextts-popup-preset-delete" class="menu_button" title="删除配音配置">
                         <i class="fa-solid fa-trash-can"></i>
                     </div>
                 </div>
@@ -1102,62 +1330,71 @@
 
         renderListResults();
 
-        // ==================== Popup Preset Management ====================
+        // ==================== Card-scoped Voice Profile Management ====================
         const populatePopupPresetUI = () => {
-            const root = getRootSettings();
             const selectEl = modal.querySelector('#indextts-popup-preset-select');
             const nameEl = modal.querySelector('#indextts-popup-preset-name');
             if (!selectEl || !nameEl) return;
-            selectEl.innerHTML = Object.keys(root.presets).map(name =>
-                `<option value="${name}"${name === root.selected_preset ? ' selected' : ''}>${name}</option>`
+            selectEl.innerHTML = Object.keys(cardStore.configs).map(name =>
+                `<option value="${name}"${name === cardStore.selected ? ' selected' : ''}>${name}</option>`
             ).join('');
-            nameEl.value = root.selected_preset;
+            nameEl.value = cardStore.selected;
         };
         populatePopupPresetUI();
 
-        // Switch preset → switchPreset 移除重绘（switchPreset 自动重开弹窗和面板）
+        // 只切换当前角色卡的配音配置，与播放器预设完全独立。
         const popupPresetSelect = modal.querySelector('#indextts-popup-preset-select');
         if (popupPresetSelect) {
             popupPresetSelect.onchange = () => {
-                switchPreset(popupPresetSelect.value);
+                cardStore.selected = popupPresetSelect.value;
+                voiceMap = cardStore.configs[cardStore.selected];
+                modal.querySelector('#indextts-popup-preset-name').value = cardStore.selected;
+                saveSettings();
+                renderListResults();
+                refreshAllMessages();
             };
         }
 
-        // Save preset from popup
+        // 保存当前配置，或以输入名称复制为新配置。
         const popupPresetSave = modal.querySelector('#indextts-popup-preset-save');
         if (popupPresetSave) {
             popupPresetSave.onclick = () => {
-                const root = getRootSettings();
                 const nameEl = modal.querySelector('#indextts-popup-preset-name');
                 const name = (nameEl?.value || '').trim();
                 if (!name) {
-                    if (window.toastr) window.toastr.warning('请输入预设名称');
+                    if (window.toastr) window.toastr.warning('请输入配音配置名称');
                     return;
                 }
-                root.presets[name] = JSON.parse(JSON.stringify(getSettings()));
-                root.selected_preset = name;
+                if (name !== cardStore.selected) {
+                    cardStore.configs[name] = JSON.parse(JSON.stringify(voiceMap));
+                }
+                cardStore.selected = name;
+                voiceMap = cardStore.configs[name];
                 saveSettings();
                 populatePopupPresetUI();
-                if (window.toastr) window.toastr.success(`预设 "${name}" 已保存`);
+                if (window.toastr) window.toastr.success(`配音配置 "${name}" 已保存`);
             };
         }
 
-        // Delete preset from popup
+        // 删除只影响当前角色卡的配音配置。
         const popupPresetDel = modal.querySelector('#indextts-popup-preset-delete');
         if (popupPresetDel) {
             popupPresetDel.onclick = () => {
-                const root = getRootSettings();
-                const keys = Object.keys(root.presets);
+                const keys = Object.keys(cardStore.configs);
                 if (keys.length <= 1) {
-                    if (window.toastr) window.toastr.warning('至少需要保留一个预设');
+                    if (window.toastr) window.toastr.warning('至少需要保留一个配音配置');
                     return;
                 }
-                const current = root.selected_preset;
-                if (!confirm(`确定要删除预设 "${current}" 吗？`)) return;
-                delete root.presets[current];
-                // switchPreset 会删除弹窗并重新打开
-                switchPreset(Object.keys(root.presets)[0]);
-                if (window.toastr) window.toastr.success(`已删除预设 "${current}"`);
+                const current = cardStore.selected;
+                if (!confirm(`确定要删除配音配置 "${current}" 吗？`)) return;
+                delete cardStore.configs[current];
+                cardStore.selected = Object.keys(cardStore.configs)[0];
+                voiceMap = cardStore.configs[cardStore.selected];
+                saveSettings();
+                populatePopupPresetUI();
+                renderListResults();
+                refreshAllMessages();
+                if (window.toastr) window.toastr.success(`已删除配音配置 "${current}"`);
             };
         }
 
@@ -1204,7 +1441,13 @@
 
         // Export/Import
         modal.querySelector('#indextts-export').onclick = () => {
-            const allData = JSON.parse(JSON.stringify(settings.voiceMap));
+            const allData = {
+                version: 2,
+                cardId,
+                cardName,
+                selected: cardStore.selected,
+                configs: JSON.parse(JSON.stringify(cardStore.configs)),
+            };
             const json = JSON.stringify(allData, null, 2);
             const blob = new Blob([json], { type: 'application/json' });
             const a = document.createElement('a');
@@ -1224,15 +1467,24 @@
                 if (!file) return;
                 try {
                     const data = JSON.parse(await file.text());
-                    // Merge
-                    Object.entries(data).forEach(([cid, charMap]) => {
-                        if (!settings.voiceMap[cid]) settings.voiceMap[cid] = {};
-                        Object.assign(settings.voiceMap[cid], charMap);
-                    });
+                    if (data?.configs && typeof data.configs === 'object') {
+                        for (const [name, characterMap] of Object.entries(data.configs)) {
+                            if (characterMap && typeof characterMap === 'object') {
+                                cardStore.configs[name] = { ...(cardStore.configs[name] || {}), ...characterMap };
+                            }
+                        }
+                        if (data.selected && cardStore.configs[data.selected]) cardStore.selected = data.selected;
+                    } else {
+                        // 兼容旧版“全部角色卡 voiceMap”文件和直接角色音色表文件。
+                        const legacyMap = data?.[cardId] && typeof data[cardId] === 'object' ? data[cardId] : data;
+                        Object.assign(voiceMap, legacyMap);
+                    }
+                    voiceMap = cardStore.configs[cardStore.selected];
                     saveSettings();
                     if (window.toastr) window.toastr.success('已导入');
-                    modal.remove(); // Close to refresh state properly
-                    showConfigPopup();
+                    populatePopupPresetUI();
+                    renderListResults();
+                    refreshAllMessages();
                 } catch (e) {
                     if (window.toastr) window.toastr.error('导入失败');
                 }
@@ -1356,27 +1608,15 @@
 
         const voiceMap = getVoiceMap();
 
-        // Get text content, apply regex filters, then split by lines
-        const rawTextContent = mesText.innerText || '';
-        const textContent = applyRegexFilters(rawTextContent);
-        const lines = textContent.split('\n');
-
-        // Find all VN-format lines and their positions
-        const vnLines = [];
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-
-            const parsed = parseVNLine(trimmed);
-            if (parsed) {
-                vnLines.push({
-                    original: trimmed,
-                    parsed: parsed,
-                    // Remove fallback to defaultVoice to detect unset state
-                    voice: voiceMap[parsed.character]
-                });
-            }
-        }
+        // 从酒馆原始消息读取，避免 @VOICE 行被显示正则隐藏后丢失。
+        const sourceText = applyRegexFilters(getRawMessageText(msg));
+        const vnLines = parseMessageVoicePairs(sourceText, settings).map(item => ({
+            original: item.original,
+            parsed: item.parsed,
+            ttsText: item.ttsText,
+            lang: item.lang,
+            voice: voiceMap[item.parsed.character]
+        }));
 
         if (vnLines.length === 0) {
             mesText.dataset.indexttsInjected = 'true';
@@ -1389,9 +1629,10 @@
 
         for (const vn of vnLines) {
             // Encode dialogue & character for data attribute
-            const enc = utf8ToBase64(vn.parsed.dialogue);
+            const enc = utf8ToBase64(vn.ttsText);
             const charEnc = utf8ToBase64(vn.parsed.character);
             const emotionEnc = vn.parsed.emotion || '';
+            const langEnc = vn.lang || 'ZH';
 
             // 仅在原 HTML 中查找「带引号的对话」部分（第二组）
             const dialogueContent = vn.parsed.rawContent;
@@ -1408,7 +1649,7 @@
                 if (match.includes('indextts-dialogue')) return match;
                 modified = true;
 
-                return `<span class="indextts-dialogue" data-t="${enc}" data-v="${vn.voice || ''}" data-c="${charEnc}" data-e="${emotionEnc}" title="点击播放">${match}</span><span class="indextts-inline-play" data-t="${enc}" data-v="${vn.voice || ''}" data-c="${charEnc}" data-e="${emotionEnc}" title="播放"><i class="fa-solid fa-play fa-xs"></i></span>`;
+                return `<span class="indextts-dialogue" data-t="${enc}" data-v="${vn.voice || ''}" data-c="${charEnc}" data-e="${emotionEnc}" data-lang="${langEnc}" title="点击播放">${match}</span><span class="indextts-inline-play" data-t="${enc}" data-v="${vn.voice || ''}" data-c="${charEnc}" data-e="${emotionEnc}" data-lang="${langEnc}" title="播放"><i class="fa-solid fa-play fa-xs"></i></span>`;
             });
         }
 
@@ -1425,8 +1666,9 @@
                     const voice = span.dataset.v;
                     const character = base64ToUtf8(span.dataset.c || '');
                     const emotion = span.dataset.e || null;
+                    const lang = span.dataset.lang || 'ZH';
                     const msgEl = span.closest('.mes');
-                    playSingleLine(text, voice, character, { msg: msgEl, encT: span.dataset.t, encC: span.dataset.c, emotion });
+                    playSingleLine(text, voice, character, { msg: msgEl, encT: span.dataset.t, encC: span.dataset.c, emotion, lang });
                 };
             });
 
@@ -1440,8 +1682,9 @@
                     const voice = btn.dataset.v;
                     const character = base64ToUtf8(btn.dataset.c || '');
                     const emotion = btn.dataset.e || null;
+                    const lang = btn.dataset.lang || 'ZH';
                     const msgEl = btn.closest('.mes');
-                    playSingleLine(text, voice, character, { msg: msgEl, encT: btn.dataset.t, encC: btn.dataset.c, emotion });
+                    playSingleLine(text, voice, character, { msg: msgEl, encT: btn.dataset.t, encC: btn.dataset.c, emotion, lang });
                 };
             });
         }
@@ -1533,21 +1776,22 @@
             return result;
         }
 
-        // GAL 模式：解析 VN 格式，未配置配音也纳入结果并打日志
-        for (const line of textContent.split('\n')) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-            const parsed = parseVNLine(trimmed);
+        // GAL 模式：优先读取酒馆原始消息并关联紧邻的 @VOICE-XX 行。
+        const sourceText = applyRegexFilters(getRawMessageText(msg));
+        for (const item of parseMessageVoicePairs(sourceText, settings)) {
+            const parsed = item.parsed;
             if (parsed && !parsed.isAction) {
                 const voice = voiceMap[parsed.character];
                 if (voice === undefined || voice === null || voice === '') {
                     console.warn('[IndexTTS2] 角色未配置配音，将跳过推理:', parsed.character);
                 }
                 result.push({
-                    text: parsed.dialogue,
+                    text: item.ttsText,
+                    displayText: item.displayText,
                     character: parsed.character,
                     voice: voice !== undefined && voice !== null && voice !== '' ? voice : undefined,
                     emotion: parsed.emotion || null,
+                    lang: item.lang,
                 });
             }
         }
@@ -2215,14 +2459,17 @@
                             character: line.character,
                             voice: line.voice,
                             emotion: line.emotion,
+                            lang: line.lang || 'ZH',
                         });
                         if (!record) continue;
                         if (record.isCached) cachedCount++;
                         const blobUrl = URL.createObjectURL(record.blob);
                         list.push({
                             text: line.text,
+                            displayText: line.displayText || line.text,
                             character: line.character,
                             voice: line.voice,
+                            lang: line.lang || 'ZH',
                             hash: record.hash,
                             blobUrl,
                         });
@@ -2340,6 +2587,7 @@
                     const mergedBlobUrl = URL.createObjectURL(wavBlob);
                     const lineTimeline = queueItems.map((item, i) => ({
                         text: item.text,
+                        displayText: item.displayText || item.text,
                         character: item.character,
                         start: boundaries[i].start,
                         end: boundaries[i].end,
@@ -2388,7 +2636,7 @@
                 }
                 TTSPlayerWindow.updateInfo({
                     name: displayChar,
-                    text: firstLine.text,
+                    text: firstLine.displayText || firstLine.text,
                     avatarUrl: avatarEl ? avatarEl.src : null
                 });
             }
@@ -2415,7 +2663,7 @@
                     }
                     TTSPlayerWindow.updateInfo({
                         name: displayChar,
-                        text: curr.text,
+                        text: curr.displayText || curr.text,
                         avatarUrl: avatarEl ? avatarEl.src : null
                     });
                 }
@@ -2522,8 +2770,6 @@
         if (!container) return;
 
         const settings = getSettings();
-        const volumeVal = typeof settings.volume === 'number' ? settings.volume : 1.0;
-
         // Prepare Path Display
         let pathDisplay = settings.cacheImportPath || '未设置本地目录';
         const handle = LocalRepo.getHandle();
@@ -2562,14 +2808,6 @@
                                 <label>TTS 服务地址</label>
                                 <input type="text" id="indextts-url" class="text_pole" value="${settings.apiUrl}">
                             </div>
-                            <div class="indextts-setting-row">
-                                <label>音色克隆地址</label>
-                                <input type="text" id="indextts-clone-url" class="text_pole" value="${settings.cloningUrl}">
-                            </div>
-                             <div class="indextts-setting-row">
-                                <label>推理模型名称</label>
-                                <input type="text" id="indextts-model" class="text_pole" value="${settings.model}">
-                            </div>
                         </div>
 
                         <!-- 模块：提示词管理 -->
@@ -2597,6 +2835,41 @@
                             </div>
                         </div>
 
+                        <!-- 模块：他国配音（与原提示词管理独立） -->
+                        <div class="indextts-setting-module indextts-other-dub-module">
+                            <div class="indextts-module-header">🌍 他国配音</div>
+                            <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-other-dub-enable">启用他国配音</label>
+                                <input type="checkbox" id="indextts-other-dub-enable"${settings.otherCountryDubbing?.enabled ? ' checked' : ''}>
+                            </div>
+                            <div id="indextts-other-dub-details" class="indextts-other-dub-details${settings.otherCountryDubbing?.enabled ? ' is-open' : ''}">
+                                <div class="indextts-setting-row">
+                                    <label>目标语言</label>
+                                    <select id="indextts-other-dub-language" class="text_pole">
+                                        ${Object.entries(OTHER_DUB_LANGUAGES).map(([code, item]) => `<option value="${code}"${(settings.otherCountryDubbing?.language || 'JA') === code ? ' selected' : ''}>${item.name} ${code}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div class="indextts-setting-row">
+                                    <label>注入深度 (Depth)</label>
+                                    <input type="number" id="indextts-other-dub-depth" class="text_pole" value="${settings.otherCountryDubbing?.depth ?? 4}" min="0">
+                                </div>
+                                <div class="indextts-setting-row">
+                                    <label>注入角色 (Role)</label>
+                                    <select id="indextts-other-dub-role" class="text_pole">
+                                        <option value="system"${settings.otherCountryDubbing?.role === 'system' ? ' selected' : ''}>System</option>
+                                        <option value="user"${settings.otherCountryDubbing?.role === 'user' ? ' selected' : ''}>User</option>
+                                        <option value="assistant"${settings.otherCountryDubbing?.role === 'assistant' ? ' selected' : ''}>Assistant</option>
+                                    </select>
+                                </div>
+                                <div class="indextts-setting-row indextts-other-dub-prompt-row">
+                                    <label>语言格式提示词</label>
+                                    <textarea id="indextts-other-dub-prompt" class="text_pole" rows="8" placeholder="输入他国配音格式提示词..."></textarea>
+                                    <div id="indextts-other-dub-macro-warning" class="indextts-macro-warning"></div>
+                                    <button type="button" id="indextts-other-dub-reset" class="menu_button">恢复当前语言默认提示词</button>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- 模块2：播放与自动化 -->
                          <div class="indextts-setting-module">
                             <div class="indextts-module-header">▶ 播放与自动化</div>
@@ -2618,14 +2891,6 @@
                             <div class="indextts-setting-row">
                                 <label>默认朗读音色</label>
                                 <input type="text" id="indextts-voice" class="text_pole" value="${settings.defaultVoice}">
-                            </div>
-                             <div class="indextts-setting-row">
-                                <label>默认速度: <span id="indextts-speed-val">${settings.speed}</span></label>
-                                <input type="range" id="indextts-speed" min="0.5" max="2" step="0.1" value="${settings.speed}">
-                            </div>
-                             <div class="indextts-setting-row">
-                                <label>全局音量: <span id="indextts-volume-val">${volumeVal.toFixed(2)}</span></label>
-                                <input type="range" id="indextts-volume" min="0" max="1" step="0.05" value="${volumeVal}">
                             </div>
                         </div>
 
@@ -2685,8 +2950,6 @@
         };
 
         bindInput('#indextts-url', 'apiUrl');
-        bindInput('#indextts-clone-url', 'cloningUrl');
-        bindInput('#indextts-model', 'model');
 
         // 2. Playback & Automation
         const bindSelect = (id, field) => {
@@ -2726,29 +2989,6 @@
             };
         }
 
-        // Sliders
-        const speedInput = panel.querySelector('#indextts-speed');
-        if (speedInput) {
-            speedInput.oninput = (e) => {
-                const val = parseFloat(e.target.value);
-                document.getElementById('indextts-speed-val').textContent = val;
-                const s = getSettings();
-                s.speed = val;
-                saveSettings();
-            };
-        }
-
-        const volInput = panel.querySelector('#indextts-volume');
-        if (volInput) {
-            volInput.oninput = (e) => {
-                const val = parseFloat(e.target.value);
-                document.getElementById('indextts-volume-val').textContent = val.toFixed(2);
-                const s = getSettings();
-                s.volume = val;
-                saveSettings();
-            };
-        }
-
         // ==================== Module: Prompt Injection ====================
         const bindPrompt = (id, field) => {
             const el = panel.querySelector(id);
@@ -2769,6 +3009,83 @@
         bindPrompt('#indextts-prompt-depth', 'depth');
         bindPrompt('#indextts-prompt-role', 'role');
         bindPrompt('#indextts-prompt-content', 'content');
+
+        // ==================== Module: Other-country Dubbing ====================
+        const dubEnable = panel.querySelector('#indextts-other-dub-enable');
+        const dubDetails = panel.querySelector('#indextts-other-dub-details');
+        const dubLanguage = panel.querySelector('#indextts-other-dub-language');
+        const dubDepth = panel.querySelector('#indextts-other-dub-depth');
+        const dubRole = panel.querySelector('#indextts-other-dub-role');
+        const dubPrompt = panel.querySelector('#indextts-other-dub-prompt');
+        const dubWarning = panel.querySelector('#indextts-other-dub-macro-warning');
+        const dubReset = panel.querySelector('#indextts-other-dub-reset');
+
+        const ensureDubSettings = () => {
+            const s = getSettings();
+            if (!s.otherCountryDubbing || typeof s.otherCountryDubbing !== 'object') {
+                s.otherCountryDubbing = JSON.parse(JSON.stringify(defaultSettings.otherCountryDubbing));
+            }
+            if (!s.otherCountryDubbing.prompts || typeof s.otherCountryDubbing.prompts !== 'object') {
+                s.otherCountryDubbing.prompts = JSON.parse(JSON.stringify(defaultSettings.otherCountryDubbing.prompts));
+            }
+            return s.otherCountryDubbing;
+        };
+        const updateDubMacroWarning = () => {
+            if (!dubPrompt || !dubWarning) return;
+            const missing = [];
+            if (!dubPrompt.value.includes('{{TARGET_LANGUAGE}}')) missing.push('{{TARGET_LANGUAGE}}');
+            if (!dubPrompt.value.includes('{{LANG_CODE}}')) missing.push('{{LANG_CODE}}');
+            dubWarning.textContent = missing.length
+                ? `⚠ 未检测到 ${missing.join(' 和 ')}。仍可保存，但切换语言时提示词可能无法自动适配。`
+                : '';
+            dubWarning.style.display = missing.length ? 'block' : 'none';
+        };
+        const loadDubPrompt = () => {
+            const config = ensureDubSettings();
+            const code = String(config.language || 'JA').toUpperCase();
+            dubPrompt.value = config.prompts[code] ?? OTHER_DUB_LANGUAGES[code]?.prompt ?? '';
+            updateDubMacroWarning();
+        };
+
+        if (dubEnable) dubEnable.onchange = (e) => {
+            const config = ensureDubSettings();
+            config.enabled = e.target.checked;
+            dubDetails?.classList.toggle('is-open', config.enabled);
+            saveSettings();
+            clearMemoryAudioCache();
+            refreshAllMessages();
+        };
+        if (dubLanguage) dubLanguage.onchange = (e) => {
+            const config = ensureDubSettings();
+            config.language = e.target.value;
+            saveSettings();
+            loadDubPrompt();
+            clearMemoryAudioCache();
+            refreshAllMessages();
+        };
+        if (dubDepth) dubDepth.onchange = (e) => {
+            ensureDubSettings().depth = parseInt(e.target.value, 10) || 0;
+            saveSettings();
+        };
+        if (dubRole) dubRole.onchange = (e) => {
+            ensureDubSettings().role = e.target.value;
+            saveSettings();
+        };
+        if (dubPrompt) dubPrompt.oninput = dubPrompt.onchange = (e) => {
+            const config = ensureDubSettings();
+            const code = String(config.language || 'JA').toUpperCase();
+            config.prompts[code] = e.target.value;
+            updateDubMacroWarning();
+            saveSettings();
+        };
+        if (dubReset) dubReset.onclick = () => {
+            const config = ensureDubSettings();
+            const code = String(config.language || 'JA').toUpperCase();
+            config.prompts[code] = OTHER_DUB_LANGUAGES[code]?.prompt || '';
+            saveSettings();
+            loadDubPrompt();
+        };
+        loadDubPrompt();
 
         // ==================== Module 3: Audio Cache Management ====================
         const pathInputEl = panel.querySelector('#indextts-local-path');
@@ -3281,20 +3598,31 @@
                     const settings = getSettings();
                     const config = settings.promptInjection;
 
-                    if (config && config.enabled && config.content) {
-                        const depth = parseInt(config.depth) || 0;
-                        const injection = {
-                            role: config.role || 'system',
-                            content: config.content
-                        };
-
-                        // Calculate insertion index
+                    const injectAtDepth = (content, depthValue, roleValue) => {
+                        const depth = parseInt(depthValue, 10) || 0;
                         let index = eventData.chat.length - depth;
                         if (index < 0) index = 0;
                         if (index > eventData.chat.length) index = eventData.chat.length;
+                        eventData.chat.splice(index, 0, { role: roleValue || 'system', content });
+                    };
 
-                        eventData.chat.splice(index, 0, injection);
-                        console.log(`[IndexTTS2] Injected prompt at depth ${depth} (index ${index})`, injection);
+                    if (config && config.enabled && config.content) {
+                        injectAtDepth(config.content, config.depth, config.role);
+                        console.log('[IndexTTS2] Injected original format prompt');
+                    }
+
+                    const dubbing = settings.otherCountryDubbing;
+                    if (dubbing?.enabled) {
+                        const code = String(dubbing.language || 'JA').toUpperCase();
+                        const language = OTHER_DUB_LANGUAGES[code]?.name || code;
+                        const template = dubbing.prompts?.[code] || OTHER_DUB_LANGUAGES[code]?.prompt || '';
+                        if (template) {
+                            const content = template
+                                .replaceAll('{{TARGET_LANGUAGE}}', language)
+                                .replaceAll('{{LANG_CODE}}', code);
+                            injectAtDepth(content, dubbing.depth, dubbing.role);
+                            console.log(`[IndexTTS2] Injected other-country dubbing prompt: ${code}`);
+                        }
                     }
                 });
             }
@@ -3403,6 +3731,12 @@
         getSettings: getSettings,
         getVoiceMap: getVoiceMap,
         parseVNLine: parseVNLine,
+        parseMessageVoicePairs: parseMessageVoicePairs,
         getCardId: getCardId,
+        stop: function () {
+            if (currentPlayback.stop) currentPlayback.stop();
+            else if (currentPlayback.audio) currentPlayback.audio.pause();
+            clearPlayingInMessage(currentPlayback.msg);
+        },
     };
 })();

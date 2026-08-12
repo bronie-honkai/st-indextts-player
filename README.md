@@ -1,3 +1,31 @@
+# IndexTTS Player v2.0.0 更新（2026-08-12）
+
+- 项目名称统一为 `indextts-player`，兼容 IndexTTS 2.0 与 IndexTTS-2.5。
+- 保留内部设置键 `st-indextts2`，确保已有 SillyTavern 配置平滑迁移。
+
+- “配音配置”已从播放器预设中完全独立，改为角色卡级配置。
+- 每张角色卡可以建立、命名、切换和删除自己的多套配音配置。
+- 切换“预设管理”中的服务、播放或提示词预设，不再改变当前角色卡的音色映射。
+- 自动迁移旧预设中的音色表，并继续兼容旧版配音配置 JSON 导入。
+
+- 他国配音提示词补充了强制发音标注规则：人名、地名和易误读专有词会主动生成 `<文字|发音>`。
+
+# v1.5.0 更新（2026-08-12，合并至 v2.0.0）
+
+- 新增 IndexTTS-2.5 请求兼容：`lang`、`duration_factor`、`emo_vector`、`emo_alpha`、`use_random`，同时保留旧版情感字段。
+- 新增独立“他国配音”模块，支持日语 `JA`、英语 `EN`、西班牙语 `ES`、阿拉伯语 `AR`。
+- 支持在每句原台词的紧邻下一行提供配音：`@VOICE-JA: ...`。关闭功能或缺少配音行时自动朗读原文。
+- 配音行可以保留 IndexTTS-2.5 官方 `<文字|发音>` 标注。
+- 他国配音提示词按语言分别保存；缺少 `{{TARGET_LANGUAGE}}` 或 `{{LANG_CODE}}` 时仅提醒，不禁止编辑与保存。
+
+示例：
+
+```text
+[神尾观铃|校服|低落][0,0,0.2,0,0,0.4,0,0.2]|「呐，大哥哥。如果有一天，观铃不能再走路了……」
+@VOICE-JA: ねえ、お兄ちゃん。もし、いつか、<観鈴|みすず>が歩けなくなったら……
+```
+
+插件优先从 SillyTavern 原始消息读取配音行，因此可以用显示正则隐藏 `@VOICE-...:`，不影响语音生成。
 
 
 # v1.4.2 更新（2026-07-13）
@@ -51,11 +79,11 @@
 
 详细变更请参见：`UPDATE_REPORT.md`
 
-# IndexTTS2 Player 🎙️
+# IndexTTS Player 🎙️
 
 一个为 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 设计的高级文本转语音（TTS）播放器扩展，支持智能角色配音、音声克隆、行内播放、多种解析模式等功能。
 
-**版本**: 1.4.2 | **作者**: kirara
+**版本**: 2.0.0 | **作者**: kirara
 
 ---
 
@@ -197,13 +225,13 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 1. **克隆或下载本扩展**
 
    ```bash
-   git clone https://github.com/bronie-honkai/st-indextts2.git
+   git clone https://github.com/bronie-honkai/indextts-player.git
    ```
 
 2. **复制文件到扩展目录**
 
    ```
-   SillyTavern/public/scripts/extensions/third-party/st-indextts2/
+   SillyTavern/public/scripts/extensions/third-party/indextts-player/
    ├── index.js
    ├── manifest.json
    ├── style.css

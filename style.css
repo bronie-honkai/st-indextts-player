@@ -1100,6 +1100,55 @@
 /* ============================================================
    Mobile Fullscreen Adaptation (手机端全屏适配)
    ============================================================ */
+.indextts-other-dub-details {
+    display: none;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.12));
+}
+
+.indextts-other-dub-details.is-open {
+    display: block;
+}
+
+.indextts-other-dub-prompt-row {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.indextts-other-dub-prompt-row textarea {
+    width: 100%;
+    min-height: 360px;
+    resize: vertical;
+}
+
+.indextts-other-dub-prompt-row #indextts-other-dub-reset {
+    box-sizing: border-box;
+    width: 100% !important;
+    min-width: 0 !important;
+    min-height: 36px;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center;
+    justify-content: center;
+    align-self: stretch;
+    white-space: nowrap !important;
+    writing-mode: horizontal-tb !important;
+    padding: 7px 12px;
+}
+
+.indextts-macro-warning {
+    display: none;
+    margin: 6px 0;
+    padding: 7px 9px;
+    border: 1px solid rgba(255, 193, 7, 0.55);
+    border-radius: 5px;
+    color: #ffd166;
+    background: rgba(255, 193, 7, 0.08);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
 @media (max-width: 767px) {
     .indextts-modal-overlay {
         align-items: stretch;

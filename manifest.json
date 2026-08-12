@@ -1,9 +1,9 @@
 {
-    "name": "st-indextts2",
-    "display_name": "IndexTTS2 Player",
-    "description": "IndexTTS2 播放器，支持引号检测与行内播放。",
+    "name": "indextts-player",
+    "display_name": "IndexTTS Player",
+    "description": "兼容 IndexTTS 2.0 与 2.5 的 SillyTavern 播放器。",
     "author": "kirara",
-    "version": "1.4.2",
+    "version": "2.0.0",
     "loading_order": 101,
     "js": "index.js",
     "css": "style.css"
