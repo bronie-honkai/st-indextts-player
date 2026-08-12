@@ -1,15 +1,16 @@
-﻿# ST-IndexTTS Player v2.0.1 最新更新速览（2026-08-13）
+﻿# ST-IndexTTS Player v2.0.2 最新更新速览（2026-08-14）
 
-- 新增“对话显示为‘人名：「内容」’”开关，默认开启，仅美化酒馆聊天气泡，不修改原始消息或后端发送内容。
-- 自动隐藏气泡中的 `@VOICE-XX:` 配音行，同时保留 IndexTTS-2.5 他国配音、发音标注和八维情感向量解析。
-- 修复显示美化开启后逐句播放按钮消失的问题。
-- 协议行新增整行 Markdown 加粗兼容，角色自动发现继续读取酒馆原始消息。
+- 新增“前端卡兼容模式”，避免正文改写和行内按钮干扰 iframe 角色卡前端正则。
+- 新增“酒馆通知”总开关，以及绿色、黄色、红色三类独立通知开关。
+- 绿色成功与普通信息默认关闭，避免连续弹出“播放中……”等提示；警告和错误默认保留。
+- 通知过滤仅作用于 IndexTTS Player，不影响 SillyTavern 本体与其他插件。
+- 全面校正 README，使安装、IndexTTS 2.0/2.5 协议、角色卡配音配置和现有界面保持一致。
 
 # ST-IndexTTS Player 🎙️
 
-一个为 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 设计的高级文本转语音（TTS）播放器扩展，支持智能角色配音、音声克隆、行内播放、多种解析模式等功能。
+一个为 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 设计的高级文本转语音（TTS）播放器扩展，支持智能角色配音、参考音频、行内播放、多种解析模式等功能。
 
-**版本**: 2.0.1 | **作者**: kirara
+**版本**: 2.0.2 | **作者**: kirara
 
 ---
 
@@ -26,8 +27,8 @@
 | 🖱️ **行内播放按钮** | 在对话文本中注入可点击的播放按钮，支持逐句播放 |
 | ⚡ **迷你浮窗播放器** | 实时进度条、倍速调节、音量控制，使用体验媲美专业播放器 |
 | 💾 **智能音频缓存** | 基于 IndexedDB 的持久化缓存，支持导入/导出本地音频库 |
-| 🎯 **自动推理生成** | AI 回复后自动生成语音，无需手动点击即可享受配音 |
-| 🔊 **音声克隆** | 上传音频样本快速克隆新语音，轻松定制角色音色 |
+| 🎯 **自动推理生成** | AI 回复后自动生成并缓存语音，播放仍由用户控制 |
+| 🔊 **角色参考音频** | 为角色绑定参考音频，并按角色卡保存多套配音配置 |
 
 ### 工作原理 🔄
 
@@ -38,11 +39,11 @@ AI 生成回复
    ↓
 索引扩展检测消息
    ↓
-调用 IndexTTS2 API 生成语音
+调用 IndexTTS API 生成语音
    ↓
 缓存到本地数据库
    ↓
-用户点击播放或自动播放
+用户点击播放
    ↓
 迷你播放器提供完整控制
 ```
@@ -52,7 +53,7 @@ AI 生成回复
 - ✨ **沉浸式角色扮演** - 每个角色都有独特的语音，增强代入感
 - 📖 **有声故事朗读** - 支持完整剧本式对话，营造真实场景感
 - 🎮 **游戏剧情叙述** - 适合文字冒险游戏、互动故事等场景
-- 🚗 **无手操作** - 支持自动播放，适合开车或其他无法看屏幕的场景
+- 🚗 **连续播放** - 支持整楼层顺序播放和自动预生成
 - ♿ **无障碍辅助** - 为视障用户提供完整的语音支持
 
 ### 演示视频
@@ -67,7 +68,7 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 - **前端框架**: 原生 JavaScript（无依赖）
 - **音频处理**: Web Audio API、IndexedDB
 - **UI 框架**: 原生 DOM + CSS3（适配 SillyTavern UI）
-- **后端集成**: IndexTTS2 API（任何兼容接口的 TTS 服务）
+- **后端集成**: IndexTTS 2.0 / IndexTTS-2.5 API（兼容 `/v1/audio/speech` 的服务）
 
 ---
 
@@ -102,6 +103,12 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 - 在对话文本末尾注入可点击的播放按钮
 - 支持逐句点击播放
 - 可选的行内增强渲染切换
+- 可选将协议格式显示为 `人名：「内容」`
+
+✅ **2.5 多语言配音协议**
+- 支持日语、英语、西班牙语和阿拉伯语配音
+- 支持 `@VOICE-XX:` 配音行
+- 支持 IndexTTS-2.5 的 `<文字|发音>` 标注
 
 ✅ **高级播放控制**
 - 迷你播放器（Mini Player）悬浮窗
@@ -110,7 +117,6 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
   - 实时倍速调节
   - 自动隐藏
 - 全局音量和速度控制
-- 音频淡入/淡出平滑过渡
 
 ✅ **音频缓存系统**
 - IndexedDB 本地缓存
@@ -118,10 +124,10 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 - 快速导入本地目录音频文件
 - 缓存清空和管理功能
 
-✅ **音声克隆**（Voice Cloning）
-- 将用户上传的音频文件作为新的语音样本
-- 自动转码（支持 WAV、MP3、OGG）
-- 集成的克隆工作流
+✅ **参考音频与角色卡配置**
+- 每张角色卡独立保存配音配置
+- 支持多套可命名、可切换的角色配音配置
+- 支持上传 WAV、MP3、OGG 参考音频
 
 ✅ **自动推理功能**（Auto Inference）
 - 收到回复后自动生成语音
@@ -139,22 +145,27 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 
 ### 前置要求
 
-1. **SillyTavern** 已安装并正常运行
-2. **IndexTTS2 API 服务**（TTS 后端服务器）
-   - 默认地址：`http://127.0.0.1:7880`
-   - 需支持以下端点：
-     - `POST /v1/audio/speech` - 文本转语音
-     - `POST /api/v1/indextts2_cloning` - 音声克隆
+1. **SillyTavern** 已安装并正常运行。
+2. **IndexTTS 2.0 或 IndexTTS-2.5 API 服务**。
+   - 默认服务地址示例：`http://127.0.0.1:7880/v1/audio/speech`
+   - 核心要求：服务可以接收 `POST /v1/audio/speech` 并返回 WAV 音频。
+   - IndexTTS-2.5 推荐使用项目自带的 API 启动 BAT；克隆接口不是 2.5 标准 API 的必需条件。
 
 ### 安装步骤
 
-1. **克隆或下载本扩展**
+1. **安装本扩展**
+
+   推荐在 SillyTavern 的第三方扩展安装界面填入：
+
+   `https://github.com/bronie-honkai/st-indextts-player`
+
+   也可以手动克隆：
 
    ```bash
    git clone https://github.com/bronie-honkai/st-indextts-player.git
    ```
 
-2. **复制文件到扩展目录**
+2. **手动安装目录**
 
    ```
    SillyTavern/public/scripts/extensions/third-party/st-indextts-player/
@@ -172,7 +183,7 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 
 4. **配置 TTS 服务地址**
    - 打开扩展的 **设置面板**
-   - 输入你的 IndexTTS2 服务地址（如：`http://127.0.0.1:7880/v1/audio/speech`）
+   - 输入你的 IndexTTS 服务地址（如：`http://127.0.0.1:7880/v1/audio/speech`）
    - 保存设置
 
 ---
@@ -188,7 +199,7 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 
 2. **首次配置角色**：
    - 点击 ⚙️ **配置** 按钮
-   - 在弹出的配置面板中添加角色及其对应的语音文件
+   - 选择或新建一套配音配置，为角色绑定对应的参考音频
    - 点击 **保存** 按钮
 
 3. **开始播放**：
@@ -219,8 +230,9 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 
 ```
 ┌─────────────────────────────────────────┐
-│   🎙️ 配音配置 - 当前角色名             │
+│   🎙️ 配音配置 - 当前角色卡             │
 ├─────────────────────────────────────────┤
+│  [选择配置] [配置名称] [保存] [删除]     │
 │  [输入新角色名] [+添加]                 │
 │  [📥 导入全部] [📂 导出全部]            │
 ├─────────────────────────────────────────┤
@@ -252,12 +264,12 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
    - 所有更改完成后点击 **保存**
    - 配置自动保存到本地存储
 
-#### 配音映射表（VoiceMap）
+#### 配音配置的保存范围
 
-- 每个聊天角色对应一个独立的 VoiceMap
-- 格式：`{ [角色名]: "voice_file.wav" }`
-- 自动创建和更新
-- 支持导入/导出为 JSON 格式
+- 配音配置只跟随当前角色卡保存，不跟随播放器预设切换。
+- 一张角色卡可以建立多套有名字的配音配置，例如“中文”“日语”“测试音色”。
+- 每套配置内部保存“角色名 → 参考音频文件名”的映射。
+- 配音配置支持独立保存、切换、删除，以及导入/导出 JSON。
 
 ### 2. 文本解析模式
 
@@ -268,12 +280,11 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 **支持的格式**：
 
 ```
-[角色|表情]|「对话」                                → [角色|表情] 朗读 「对话」
-[旁白]|描述                                         → [旁白] 朗读 描述
-[角色][表情]对话                                   → [角色] 朗读 对话
-[角色]对话                                         → [角色] 朗读 对话
-[角色|表情][喜,怒,哀,惧,厌恶,低落,惊喜,平静]|「对话」           → 提取情感向量并朗读 「对话」
-[角色][喜,怒,哀,惧,厌恶,低落,惊喜,平静] 对话                     → 提取情感向量并朗读 对话
+[角色|表情]|「对话」                                      → 朗读「对话」
+[角色] 「对话」                                        → 朗读「对话」
+[角色] 内容                                            → 朗读内容
+[角色|表情][喜,怒,哀,惧,厌恶,低落,惊喜,平静]|「对话」      → 提取八维情感向量
+[角色][表情][喜,怒,哀,惧,厌恶,低落,惊喜,平静] 内容        → 提取八维情感向量
 ```
 
 **示例**：
@@ -281,12 +292,12 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 ```
 消息内容：
 [艾米|微笑]|「你好呀！」
-[旁白]|她转过身去
-[路易]「没什么，只是在想。」
+[旁白] 她转过身去
+[路易] 「没什么，只是在想。」
 
 播放效果：
 ✓ 艾米：「你好呀！」
-✗ （旁白描述不播放）
+✓ 旁白：她转过身去（前提是已为“旁白”配置音色）
 ✓ 路易：「没什么，只是在想。」
 ```
 
@@ -305,7 +316,7 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 消息内容：
 [艾米|微笑]|「你好呀！」
 她转身看向窗外。
-[路易]「没什么。」
+[路易] 「没什么。」
 
 播放效果：
 ✓ 艾米：「你好呀！」
@@ -335,11 +346,22 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 
 - **悬停**：按钮变大，颜色变亮
 - **点击**：播放该句对话
-- **长按**：呼出播放器（可选）
 
 #### 禁用方法
 
 设置面板 → **启用行内增强渲染** → 取消勾选 → 保存
+
+#### 对话显示美化
+
+设置面板 → **对话显示为“人名：「内容」”**。
+
+开启后，聊天气泡中的协议行会显示为：
+
+```text
+千岛凛：「萧凡……二年级B班。」
+```
+
+同时隐藏对应的 `@VOICE-XX:` 配音行。该功能只改变聊天气泡的显示副本；酒馆原始消息、八维情感向量、他国配音文本和发送给 IndexTTS 的内容都不会改变。关闭开关即可恢复原始格式。
 
 ### 4. 迷你播放器（Mini Player）
 
@@ -392,7 +414,7 @@ https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
 
 基于以下参数生成唯一哈希：
 ```
-hash = SHA-256(角色 | 音色ID | 速度 | 音量 | 文本)
+hash = SHA-256(角色 | 音色ID | 速度 | 音量 | 文本 | 情感向量 | 语言及2.5参数)
 ```
 
 相同输入生成相同哈希，确保缓存一致性。
@@ -415,12 +437,12 @@ hash = SHA-256(角色 | 音色ID | 速度 | 音量 | 文本)
 
 2. 点击 **📥 扫描导入** 按钮。
 
-3. 系统自动读取选定目录中的音频文件，识别格式如下：
+3. 系统递归读取选定目录中的 `.wav`、`.mp3`、`.ogg` 文件。只有插件导出的文件名格式才能可靠恢复原始缓存信息：
    ```
    [角色名]_描述文本_哈希值.wav
    ```
 
-4. 导入成功的文件会被自动加载到 IndexedDB 本地数据库缓存。
+4. 导入成功的文件会被加载到 IndexedDB 本地数据库缓存；普通音频文件也可以导入，但会按 `Imported` 记录，未必命中原有缓存。
 
 #### 缓存导出格式
 
@@ -434,54 +456,13 @@ hash = SHA-256(角色 | 音色ID | 速度 | 音量 | 文本)
 [路易]_没什么_d4e5f6.wav
 ```
 
-### 6. 音声克隆（Voice Cloning）
+### 6. 参考音频与音色克隆兼容
 
-#### 工作原理
+角色卡的配音配置支持上传 `.wav`、`.mp3` 和 `.ogg` 参考音频，插件会按后端返回的音频 ID 或文件名保存到当前角色的配置中。
 
-上传用户的音频样本 → API 处理 → 返回新的语音ID → 用于生成新的配音
+部分旧版 IndexTTS 包装 API 还提供音色克隆接口。该功能不是 IndexTTS-2.5 标准 `/v1/audio/speech` API 的必需部分；如果后端没有旧版克隆端点，仍可直接使用已有参考音频文件和 2.5 的 `prompts` 目录。
 
-#### 使用步骤
-
-1. **准备音频样本**
-   - 格式：`.wav`, `.mp3`, `.ogg`
-   - 时长：建议 5-30 秒
-   - 音质：越清晰越好
-
-2. **打开配置面板**
-   - 点击消息下的 ⚙️ **配置** 按钮
-
-3. **选择克隆对象**
-   - 在角色列表中找到要克隆的角色
-   - 其音频上传区会显示特殊的克隆界面
-
-4. **上传样本**
-   - 拖拽或点击选择音频文件
-   - 等待处理（显示"克隆中..."）
-
-5. **完成**
-   - 克隆完成后显示 ✓ 成功提示
-   - 新样本自动成为该角色的配音
-
-#### API 调用
-
-```json
-POST /api/v1/indextts2_cloning
-Content-Type: application/json
-
-{
-  "character_name": "艾米",
-  "base64_audio": "SUQzBAAAAAAAI1NTVVNbZXJpZXM..."
-}
-```
-
-响应：
-```json
-{
-  "success": true,
-  "voice_id": "cloned_amy_001",
-  "message": "克隆成功"
-}
-```
+如需使用克隆功能，请以所部署后端的接口文档为准，不要直接套用旧版请求字段。
 
 ### 7. 自动推理功能
 
@@ -496,11 +477,11 @@ AI 生成回复
     ↓
 检测到新消息
     ↓
-自动调用推理接口
+自动调用 TTS 接口并缓存音频
     ↓
 生成语音（带动画提示）
     ↓
-自动播放（可选）或静默完成
+完成后等待用户播放；自动推理本身不会强制自动播放
 ```
 
 #### 推理状态指示
@@ -530,7 +511,29 @@ AI 生成回复
 
 ---
 
-### 9. 输出正则过滤 (Regex Filter)
+### 9. 他国配音
+
+在设置面板中打开 **他国配音**，选择目标语言并启用对应语言格式提示词。当前支持：
+
+- 日语 `JA`
+- 英语 `EN`
+- 西班牙语 `ES`
+- 阿拉伯语 `AR`
+
+AI 应在每句中文台词的紧邻下一行输出对应配音：
+
+```text
+[神尾观铃|校服][0.3,0,0,0,0,0,0,0.5]|「你会带观铃去那个地方吗？」
+@VOICE-JA: その場所に、<観鈴|みすず>を連れていってくれる？
+```
+
+配音行只在启用他国配音且语言代码匹配时使用；没有对应配音行时，插件会回退朗读中文原文。`<文字|发音>` 只应写在 `@VOICE-XX:` 行中，用于人名、地名和容易误读的专有名词。
+
+提示词编辑器支持 `{{TARGET_LANGUAGE}}` 和 `{{LANG_CODE}}` 两个宏；缺少宏时，设置面板会给出提醒。
+
+---
+
+### 10. 输出正则过滤 (Regex Filter)
 
 为解决 AI 生成文本中夹杂的无关字符、特殊标签或思考内容被 TTS 误读的问题（例如 DeepSeek 等模型的 `<think>...</think>` 思维链内容），扩展内置了输出正则过滤系统。
 - **工作机制**：在文本送入 TTS 合成之前，按顺序依次执行所有已启用的正则替换。
@@ -546,14 +549,13 @@ AI 生成回复
 设置面板目前划分为以下模块：
 
 #### ⚙️ 预设管理
-- 支持创建、切换、保存和删除多个预设（Presets），便于快速在不同的后端服务配置和配音映射方案之间无缝切换。
+- 支持创建、切换、保存和删除多个播放器预设，保存服务地址、播放参数和提示词等设置。
+- 角色卡级的“配音配置”独立保存，不会因切换播放器预设而改变。
 
 #### 🔌 服务配置
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
-| **TTS 服务地址** | IndexTTS2 文本转语音 API 端点 | `http://127.0.0.1:7880/v1/audio/speech` |
-| **音色克隆地址** | 音声克隆 API 端点 | `http://127.0.0.1:7880/api/v1/indextts2_cloning` |
-| **推理模型名称** | 发送给 TTS API 的模型参数 | `index-tts2` |
+| **TTS 服务地址** | IndexTTS 2.0/2.5 文本转语音 API 端点 | `http://127.0.0.1:7880/v1/audio/speech` |
 
 #### 📝 提示词管理
 | 选项 | 说明 | 默认值 |
@@ -568,10 +570,19 @@ AI 生成回复
 |------|------|--------|
 | **解析模式** | 文本解析和朗读模式（GAL 模式 / 听书模式） | `gal` |
 | **启用行内增强渲染** | 是否在对话文本末尾注入播放按钮 | ✓ 启用 |
+| **对话显示为“人名：「内容」”** | 仅美化聊天气泡显示，不修改原始消息 | ✓ 启用 |
 | **回复后自动推理** | 收到回复后是否自动向后端发起语音合成并缓存 | ✗ 禁用 |
 | **默认朗读音色** | 当角色无专属配音时的备用音色文件名 | `default.wav` |
-| **默认速度** | 初始播放速度 | `1.0` |
-| **全局音量** | 初始播放音量 (0.0 ~ 1.0) | `1.0` |
+
+速度、音量、时长系数、情感强度和随机情感等 IndexTTS-2.5 参数由当前播放器设置及后端请求统一处理；不同版本后端不支持的字段会由后端自行忽略或按其接口规则处理。
+
+#### 🌍 他国配音
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| **启用他国配音** | 启用 `@VOICE-XX:` 配音行 | ✗ 禁用 |
+| **目标语言** | JA / EN / ES / AR | `JA` |
+| **注入深度 / 角色** | 他国配音提示词在聊天请求中的位置 | `4` / `System` |
+| **语言格式提示词** | 当前语言的配音规则，可编辑并恢复默认 | 内置模板 |
 
 #### 💾 音频缓存管理
 | 选项 | 说明 |
@@ -590,7 +601,7 @@ AI 生成回复
 
 - 所有设置自动保存到 `window.extension_settings['st-indextts2']`
 - 刷新页面后自动恢复
-- 每个聊天角色的 VoiceMap 独立保存
+- 每张角色卡的多套配音配置独立保存
 
 ### 配置重置
 
@@ -600,8 +611,9 @@ AI 生成回复
 2. 进入 **Console** 标签
 3. 执行：
    ```javascript
-   delete window.extension_settings['st-indextts2'];
-   window.saveSettingsDebounced?.();
+    const ctx = SillyTavern.getContext();
+    delete ctx.extensionSettings['st-indextts2'];
+    ctx.saveSettingsDebounced?.();
    location.reload();
    ```
 
@@ -613,7 +625,7 @@ AI 生成回复
 
 **聊天内容**：
 ```
-AI: [艾米]「你好，今天怎么样？」
+[艾米] 「你好，今天怎么样？」
 ```
 
 **配置**：
@@ -632,9 +644,9 @@ AI: [艾米]「你好，今天怎么样？」
 
 **聊天内容**：
 ```
-AI: [艾米|温柔]|「月亮很圆，不是吗？」
+[艾米|温柔]|「月亮很圆，不是吗？」
 静静的夜晚，只有风声。
-[路易]「是啊，很美。」
+[路易] 「是啊，很美。」
 他靠近窗户，看向远方。
 ```
 
@@ -656,21 +668,17 @@ AI: [艾米|温柔]|「月亮很圆，不是吗？」
 
 **工作流**：
 1. 用户提问
-2. AI 生成回复后，按钮自动显示推理中状态 ✨💫
-3. 推理完成，语音自动生成并缓存
-4. 用户点击 🔊 立即播放，无需等待
+2. AI 生成回复后，插件后台生成语音并缓存
+3. 推理完成后，用户点击 🔊 播放即可减少等待
 
 ---
 
 ### 场景 4：导入本地音频库
 
-**前提**：有本地音频文件库（如 `.wav` 文件夹）
+**前提**：有插件导出的本地音频备份文件库
 
 **步骤**：
-1. 在设置面板中设置 **本地缓存目录**
-   ```
-   \\NAS\media\tts_audio
-   ```
+1. 在设置面板中点击 **📂 选择**，选择本地缓存目录
 
 2. 点击 **📥 扫描导入**
 
@@ -742,20 +750,17 @@ window.IndexTTS.play(
 ```javascript
 {
   apiUrl: 'http://127.0.0.1:7880/v1/audio/speech',
-  cloningUrl: 'http://127.0.0.1:7880/api/v1/indextts2_cloning',
-  model: 'index-tts2',
   defaultVoice: 'default.wav',
   speed: 1.0,
+  durationFactor: 1.0,
+  emoAlpha: 0.6,
+  useRandom: false,
   volume: 1.0,
   parsingMode: 'gal',           // 'gal' | 'audiobook'
   enableInline: true,
+  formatDialogueDisplay: true,
   autoInference: false,
   cacheImportPath: 'TTSsound',
-  voiceMap: {
-    [cardId]: {
-      'character_name': 'voice_file.wav'
-    }
-  },
   regexFilters: [
     { enabled: true, regex: '/<think>[\\s\\S]*?<\\/think>\\n?/g', replacement: '' }
   ],
@@ -765,6 +770,13 @@ window.IndexTTS.play(
     position: 'depth',
     depth: 4,
     role: 'system'
+  },
+  otherCountryDubbing: {
+    enabled: false,
+    language: 'JA',
+    depth: 4,
+    role: 'system',
+    prompts: { JA: '...', EN: '...', ES: '...', AR: '...' }
   }
 }
 ```
@@ -779,7 +791,7 @@ console.log(`当前速度: ${settings.speed}x`);
 
 ##### 3. `getVoiceMap()`
 
-**功能**：获取当前聊天角色的配音映射表
+**功能**：获取当前角色卡当前选中配音配置的角色映射表
 
 **返回值**：
 
@@ -816,7 +828,11 @@ if (voiceMap['艾米']) {
 {
   character: string,    // 角色名
   dialogue: string,     // 对话内容
-  format: string        // 匹配的格式（'quote' | 'bracket' 等）
+  rawContent: string,   // 原始引号或正文内容
+  quoted: string,       // 与 rawContent 对应的原始内容
+  isAction: boolean,
+  isQuoted: boolean,
+  emotion: string|null  // 逗号分隔的八维情感向量
 }
 ```
 
@@ -832,7 +848,11 @@ if (result) {
 }
 ```
 
-##### 5. `getCardId()`
+##### 5. `parseMessageVoicePairs(text)`
+
+解析整段消息，并将每句原台词与紧邻的 `@VOICE-XX:` 配音行配对。返回结果包含 `parsed`、`displayText`、`ttsText`、`lang` 和 `hasDubbing` 等字段。
+
+##### 6. `getCardId()`
 
 **功能**：获取当前聊天的角色 ID
 
@@ -859,9 +879,16 @@ console.log(`当前角色 ID: ${cardId}`);
   "input": "你好，世界",
   "voice": "default.wav",
   "response_format": "wav",
-  "speed": 1.0
+  "speed": 1.0,
+  "lang": "ZH",
+  "duration_factor": 1.0,
+  "emo_alpha": 0.6,
+  "use_random": false,
+  "emo_vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 }
 ```
+
+当消息中存在八维情感向量时，插件还会发送对应的情感参数。`lang` 可用于 `ZH`、`JA`、`EN`、`ES`、`AR` 等当前后端支持的语言代码。
 
 **响应**：
 
@@ -878,38 +905,6 @@ Content-Type: audio/wav
 | 400 | 请求参数错误 |
 | 500 | 服务器错误 |
 
-#### 音声克隆接口
-
-**端点**：`POST {cloningUrl}`
-
-**请求体**：
-
-```json
-{
-  "character_name": "艾米",
-  "base64_audio": "SUQzBAAAAAAAI1NTVVNbZXJpZXM=..."
-}
-```
-
-**响应**：
-
-```json
-{
-  "success": true,
-  "voice_id": "cloned_amy_001",
-  "message": "克隆成功"
-}
-```
-
-或
-
-```json
-{
-  "success": false,
-  "message": "音频格式不支持"
-}
-```
-
 ---
 
 ## ❓ 常见问题
@@ -920,7 +915,7 @@ Content-Type: audio/wav
 
 1. ❌ TTS 服务不可用
    - 检查服务地址是否正确
-   - 确认 IndexTTS2 服务已启动
+    - 确认 IndexTTS 服务已启动
    - 检查网络连接
 
 2. ❌ 浏览器音量过低
@@ -929,8 +924,8 @@ Content-Type: audio/wav
    - 检查网页音量设置
 
 3. ❌ 角色未配置配音
-   - 打开配置面板检查是否添加了角色
-   - 确认上传了语音文件
+   - 打开当前消息下方的 ⚙️ **配置** 面板
+   - 确认当前角色卡和当前配音配置中都已绑定参考音频
 
 **解决步骤**：
 
@@ -953,7 +948,7 @@ console.log('Volume:', settings.volume);
 
 2. ❌ 文件格式不匹配
    - 检查文件后缀（`.wav`, `.mp3`, `.ogg`）
-   - 检查文件名是否符合格式：`[角色]_描述_哈希.wav`
+   - 只有插件导出的 `[角色]_描述_哈希.wav` 文件名才能完整恢复缓存元数据
 
 3. ❌ 权限不足
    - 确认有读取权限
@@ -1021,7 +1016,7 @@ console.log('Volume:', settings.volume);
 ### 问题排查清单
 
 - [ ] 扩展已启用（检查扩展管理面板）
-- [ ] TTS 服务正常运行（`curl http://api:7880/v1/audio/speech`）
+- [ ] TTS 服务正常运行（可访问后端提供的 `/health`，例如 `http://127.0.0.1:7880/health`）
 - [ ] API 地址正确（检查设置面板）
 - [ ] 角色已配置（打开配置面板查看）
 - [ ] 网络连接正常（检查浏览器网络标签）
@@ -1035,7 +1030,7 @@ console.log('Volume:', settings.volume);
 // 常见错误信息说明
 "[IndexTTS2] [API Request] hash_xxx"        // 正在请求 API
 "[IndexTTS2] API Error: 404"                 // API 地址错误
-"[IndexTTS2] Clone: ..., base64 len=..."     // 克隆音频处理中
+"[IndexTTS2] [Cache Hit] ..."                 // 命中本地缓存
 ```
 
 ### 常见错误信息
@@ -1054,13 +1049,14 @@ console.log('Volume:', settings.volume);
 ```javascript
 // 在控制台执行
 // 1. 清除配置
-delete window.extension_settings['st-indextts2'];
+const ctx = SillyTavern.getContext();
+delete ctx.extensionSettings['st-indextts2'];
 
-// 2. 清除缓存
-indexedDB.deleteDatabase('AudioStorage');
+// 2. 清除缓存（插件使用的数据库名）
+indexedDB.deleteDatabase('IndexTTS_Store');
 
 // 3. 保存和刷新
-window.saveSettingsDebounced?.();
+ctx.saveSettingsDebounced?.();
 setTimeout(() => location.reload(), 500);
 ```
 
@@ -1070,12 +1066,12 @@ setTimeout(() => location.reload(), 500);
 
 ### 自定义 TTS 服务对接
 
-如果要使用非 IndexTTS2 的 TTS 服务，需要修改 API 接口。
+如果要使用非 IndexTTS 的 TTS 服务，需要让它兼容插件发送的 `/v1/audio/speech` 请求，或修改 API 请求逻辑。
 
 编辑 `index.js` 中的 `ensureAudioRecord` 函数：
 
 ```javascript
-// 约第 510-546 行
+// 在 index.js 的 ensureAudioRecord 函数中
 // 修改 payload 结构以适配你的 API
 const payload = {
   model: settings.model,
@@ -1090,7 +1086,7 @@ const payload = {
 // ... API 调用代码
 ```
 
-### 批量批量处理消息
+### 批量处理消息
 
 ```javascript
 // 获取所有消息并逐个推理
@@ -1102,13 +1098,7 @@ document.querySelectorAll('.mes[is_user="false"]').forEach(msg => {
 
 ### 导出音频数据
 
-```javascript
-// 导出所有缓存的音频
-const allAudios = await window.AudioStorage.getAllAudios();
-allAudios.forEach(record => {
-  console.log(`${record.hash}: ${record.blob.size} bytes`);
-});
-```
+请使用设置面板 → **音频缓存管理** → **📂 导出备份**。`AudioStorage` 是插件内部对象，不作为 `window` 公共 API 暴露。
 
 ---
 
@@ -1149,6 +1139,13 @@ MIT License
 ---
 
 ## 历史更新速览
+
+### v2.0.1（2026-08-13）
+
+- 新增“对话显示为‘人名：「内容」’”开关，默认开启，仅美化酒馆聊天气泡，不修改原始消息或后端发送内容。
+- 自动隐藏气泡中的 `@VOICE-XX:` 配音行，同时保留 IndexTTS-2.5 他国配音、发音标注和八维情感向量解析。
+- 修复显示美化开启后逐句播放按钮消失的问题。
+- 协议行新增整行 Markdown 加粗兼容，角色自动发现继续读取酒馆原始消息。
 
 ### v2.0.0（2026-08-12）
 

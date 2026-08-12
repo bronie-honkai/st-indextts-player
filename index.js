@@ -107,7 +107,14 @@
         parsingMode: 'gal', // 'gal' | 'audiobook'
         enableInline: true, // 启用行内增强渲染
         formatDialogueDisplay: true, // 仅将聊天气泡显示为“人名：「内容」”，不修改原始消息
+        frontendCardCompatibility: false, // 前端卡兼容模式：不改写消息正文或向其中注入行内按钮
         autoInference: false, // 回复后自动推理
+        tavernNotifications: {
+            enabled: true,
+            success: false, // 绿色成功与普通信息默认关闭，避免“播放中”连续刷屏
+            warning: true,
+            error: true
+        },
         cacheImportPath: '\\\\SillyTavern\\\\data\\\\TTSsound',
         // VN format: [角色|表情]|「对话」 or [旁白]|描述
         vnRegex: '^\\[([^\\]|]+)(?:\\|[^\\]]*)?\\]\\|(.+)$',
@@ -323,6 +330,21 @@
             console.warn('[IndexTTS2] saveSettings: no save function available on Context');
         }
     }
+
+    // 仅过滤本插件产生的酒馆 toastr，不影响酒馆本体和其他扩展。
+    // info 归入绿色普通信息，与 success 共用开关。
+    const pluginToastr = new Proxy({}, {
+        get(_target, level) {
+            const toastr = window.toastr;
+            const method = toastr?.[level];
+            if (typeof method !== 'function') return () => { };
+
+            const config = getSettings().tavernNotifications || defaultSettings.tavernNotifications;
+            const category = level === 'info' ? 'success' : level;
+            if (config.enabled === false || config[category] === false) return () => { };
+            return method.bind(toastr);
+        }
+    });
 
     /**
      * 切换预设 —— 核心：移除并重绘 UI，保证 100% 同步
@@ -1154,7 +1176,7 @@
             record = await ensureAudioRecord({ text, character, voice: finalVoice, allowFetch, emotion, lang });
             if (!record) return;
         } catch (e) {
-            if (window.toastr) window.toastr.error('TTS失败: ' + e.message);
+            if (pluginToastr) pluginToastr.error('TTS失败: ' + e.message);
             return;
         }
 
@@ -1215,11 +1237,11 @@
 
         try {
             await audio.play();
-            if (window.toastr) window.toastr.success('播放中...');
+            if (pluginToastr) pluginToastr.success('播放中...');
         } catch (e) {
             cleanup();
             console.error('[IndexTTS2] Audio play error:', e);
-            if (window.toastr) window.toastr.error('播放失败: ' + e.message);
+            if (pluginToastr) pluginToastr.error('播放失败: ' + e.message);
         }
     }
 
@@ -1249,20 +1271,20 @@
             console.log(`[IndexTTS2] Clone response: ${res.status}`, text);
 
             if (!res.ok) {
-                if (window.toastr) window.toastr.error(`克隆失败 HTTP ${res.status}`);
+                if (pluginToastr) pluginToastr.error(`克隆失败 HTTP ${res.status}`);
                 return null;
             }
 
             const data = JSON.parse(text);
             const id = data.id || data.voice_id || data.filename || data.name;
             if (id) {
-                if (window.toastr) window.toastr.success(`克隆成功: ${id}`);
+                if (pluginToastr) pluginToastr.success(`克隆成功: ${id}`);
                 return id;
             }
             return null;
         } catch (e) {
             console.error('[IndexTTS2] Clone Error:', e);
-            if (window.toastr) window.toastr.error('克隆失败: ' + e.message);
+            if (pluginToastr) pluginToastr.error('克隆失败: ' + e.message);
             return null;
         }
     }
@@ -1373,7 +1395,7 @@
                 const nameEl = modal.querySelector('#indextts-popup-preset-name');
                 const name = (nameEl?.value || '').trim();
                 if (!name) {
-                    if (window.toastr) window.toastr.warning('请输入配音配置名称');
+                    if (pluginToastr) pluginToastr.warning('请输入配音配置名称');
                     return;
                 }
                 if (name !== cardStore.selected) {
@@ -1383,7 +1405,7 @@
                 voiceMap = cardStore.configs[name];
                 saveSettings();
                 populatePopupPresetUI();
-                if (window.toastr) window.toastr.success(`配音配置 "${name}" 已保存`);
+                if (pluginToastr) pluginToastr.success(`配音配置 "${name}" 已保存`);
             };
         }
 
@@ -1393,7 +1415,7 @@
             popupPresetDel.onclick = () => {
                 const keys = Object.keys(cardStore.configs);
                 if (keys.length <= 1) {
-                    if (window.toastr) window.toastr.warning('至少需要保留一个配音配置');
+                    if (pluginToastr) pluginToastr.warning('至少需要保留一个配音配置');
                     return;
                 }
                 const current = cardStore.selected;
@@ -1405,7 +1427,7 @@
                 populatePopupPresetUI();
                 renderListResults();
                 refreshAllMessages();
-                if (window.toastr) window.toastr.success(`已删除配音配置 "${current}"`);
+                if (pluginToastr) pluginToastr.success(`已删除配音配置 "${current}"`);
             };
         }
 
@@ -1445,7 +1467,7 @@
                 }
             });
             saveSettings();
-            if (window.toastr) window.toastr.success('已保存');
+            if (pluginToastr) pluginToastr.success('已保存');
             modal.remove();
             refreshAllMessages();
         };
@@ -1466,7 +1488,7 @@
             a.href = URL.createObjectURL(blob);
             a.download = `${cardName}_配音配置.json`;
             a.click();
-            if (window.toastr) window.toastr.success('已导出全部配置');
+            if (pluginToastr) pluginToastr.success('已导出全部配置');
         };
 
         modal.querySelector('#indextts-import').onclick = () => {
@@ -1492,12 +1514,12 @@
                     }
                     voiceMap = cardStore.configs[cardStore.selected];
                     saveSettings();
-                    if (window.toastr) window.toastr.success('已导入');
+                    if (pluginToastr) pluginToastr.success('已导入');
                     populatePopupPresetUI();
                     renderListResults();
                     refreshAllMessages();
                 } catch (e) {
-                    if (window.toastr) window.toastr.error('导入失败');
+                    if (pluginToastr) pluginToastr.error('导入失败');
                 }
             };
             input.click();
@@ -1613,7 +1635,7 @@
         if (!mesText) return;
 
         const settings = getSettings();
-        if (settings.formatDialogueDisplay === false || settings.parsingMode !== 'gal') {
+        if (settings.frontendCardCompatibility === true || settings.formatDialogueDisplay === false || settings.parsingMode !== 'gal') {
             restoreMessageDisplay(msg);
             return;
         }
@@ -1677,7 +1699,7 @@
         if (!mesText) return;
 
         const settings = getSettings();
-        if (settings.enableInline === false) {
+        if (settings.frontendCardCompatibility === true || settings.enableInline === false) {
             mesText.dataset.indexttsInjected = 'true';
             return;
         }
@@ -2444,7 +2466,7 @@
                 const btn = targetMsg.querySelector('.indextts-play');
                 if (btn) btn.click();
             } else {
-                if (window.toastr) window.toastr.info(direction === 1 ? '已经是最后一个有效楼层' : '已经是第一个有效楼层');
+                if (pluginToastr) pluginToastr.info(direction === 1 ? '已经是最后一个有效楼层' : '已经是第一个有效楼层');
             }
         }
 
@@ -2507,7 +2529,7 @@
 
         // 推理锁：防止重复请求
         if (inferenceLocks.has(mesId)) {
-            if (!isSilent && window.toastr) window.toastr.warning('正在推理中，请稍候...');
+            if (!isSilent && pluginToastr) pluginToastr.warning('正在推理中，请稍候...');
             return audioCache[mesId] || [];
         }
         inferenceLocks.add(mesId);
@@ -2536,9 +2558,9 @@
             let cachedCount = 0;
 
             if (!lines.length) {
-                if (!isSilent && window.toastr) window.toastr.warning('未在消息中发现符合格式的 [角色] 文本，请检查是否为 GAL 模式及剧本格式');
+                if (!isSilent && pluginToastr) pluginToastr.warning('未在消息中发现符合格式的 [角色] 文本，请检查是否为 GAL 模式及剧本格式');
             } else if (unvoicedCount === lines.length) {
-                if (!isSilent && window.toastr) window.toastr.warning('发现角色对话但均未在配置表格中关联配音，请先点击配置绑定音色');
+                if (!isSilent && pluginToastr) pluginToastr.warning('发现角色对话但均未在配置表格中关联配音，请先点击配置绑定音色');
             } else {
                 for (const line of lines) {
                     try {
@@ -2574,12 +2596,12 @@
             if (list.length) {
                 const playBtn = msg.querySelector('.indextts-play');
                 if (playBtn) playBtn.classList.add('indextts-prepared');
-                if (window.toastr && !isSilent) {
+                if (pluginToastr && !isSilent) {
                     let msgStr = cachedCount === list.length ? `已从缓存装载 ${list.length} 句音频` : `已推理 ${list.length} 句音频`;
                     if (unvoicedCount > 0 && unvoicedCount < lines.length) {
-                        window.toastr.success(`${msgStr}，${unvoicedCount} 句未配置配音已跳过`);
+                        pluginToastr.success(`${msgStr}，${unvoicedCount} 句未配置配音已跳过`);
                     } else {
-                        window.toastr.success(msgStr);
+                        pluginToastr.success(msgStr);
                     }
                 }
             }
@@ -2606,7 +2628,7 @@
 
         // 如果该楼层正在推理，直接提示并返回
         if (inferenceLocks.has(mesId)) {
-            if (window.toastr) window.toastr.warning('正在推理中，请稍候...');
+            if (pluginToastr) pluginToastr.warning('正在推理中，请稍候...');
             return;
         }
 
@@ -2616,13 +2638,13 @@
                 await inferMessageAudios(msg, null, true);
                 queue = audioCache[mesId] || [];
                 if (!queue.length) {
-                    if (window.toastr) window.toastr.warning('无储备音频，请先点击推理！');
+                    if (pluginToastr) pluginToastr.warning('无储备音频，请先点击推理！');
                     return;
                 }
             }
 
             // 1. Pre-calculate durations for Global Scrubber
-            if (window.toastr) window.toastr.info('正在准备播放列表...');
+            if (pluginToastr) pluginToastr.info('正在准备播放列表...');
 
             // Cleanup previous playback
             if (currentPlayback.stop) {
@@ -2692,7 +2714,7 @@
             const { mergedBlobUrl, lineTimeline, totalDuration } = await buildMergedPlaylist(queue);
 
             if (!totalDuration || totalDuration <= 0) {
-                if (window.toastr) window.toastr.error('音频合并失败，时长为 0');
+                if (pluginToastr) pluginToastr.error('音频合并失败，时长为 0');
                 return;
             }
 
@@ -2806,12 +2828,12 @@
             // 开始播放
             audio.play().catch(e => {
                 console.error('[IndexTTS2] 合并播放启动失败:', e);
-                if (window.toastr) window.toastr.error('自动播放被拦截，请点击播放按钮');
+                if (pluginToastr) pluginToastr.error('自动播放被拦截，请点击播放按钮');
             });
 
         })().catch(e => {
             console.error('[IndexTTS2] playMessageQueue error:', e);
-            if (window.toastr) window.toastr.error('播放队列出错: ' + e.message);
+            if (pluginToastr) pluginToastr.error('播放队列出错: ' + e.message);
         });
     }
 
@@ -2977,6 +2999,13 @@
                                 <input type="checkbox" id="indextts-enable-inline"${settings.enableInline !== false ? ' checked' : ''}>
                             </div>
                             <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-frontend-card-compatibility">前端卡兼容模式</label>
+                                <input type="checkbox" id="indextts-frontend-card-compatibility"${settings.frontendCardCompatibility === true ? ' checked' : ''}>
+                            </div>
+                            <div style="color:#aaa; font-size:12px; margin:-4px 0 8px; line-height:1.5;">
+                                开启后不改写聊天正文，也不向正文注入逐句播放按钮，避免干扰 iframe 和角色卡前端正则；楼层播放、推理及前端主动配音仍可使用。
+                            </div>
+                            <div class="indextts-setting-row checkbox-row">
                                 <label for="indextts-format-dialogue-display">对话显示为“人名：「内容」”</label>
                                 <input type="checkbox" id="indextts-format-dialogue-display"${settings.formatDialogueDisplay !== false ? ' checked' : ''}>
                             </div>
@@ -2987,6 +3016,30 @@
                             <div class="indextts-setting-row">
                                 <label>默认朗读音色</label>
                                 <input type="text" id="indextts-voice" class="text_pole" value="${settings.defaultVoice}">
+                            </div>
+                        </div>
+
+                        <!-- 模块：酒馆通知 -->
+                        <div class="indextts-setting-module">
+                            <div class="indextts-module-header">🔔 酒馆通知</div>
+                            <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-notify-enabled">启用 IndexTTS 插件通知</label>
+                                <input type="checkbox" id="indextts-notify-enabled"${settings.tavernNotifications?.enabled !== false ? ' checked' : ''}>
+                            </div>
+                            <div style="color:#aaa; font-size:12px; margin:-4px 0 8px; line-height:1.5;">
+                                只控制本插件弹出的酒馆通知，不影响酒馆和其他插件。
+                            </div>
+                            <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-notify-success">🟢 绿色成功与普通信息</label>
+                                <input type="checkbox" id="indextts-notify-success"${settings.tavernNotifications?.success === true ? ' checked' : ''}>
+                            </div>
+                            <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-notify-warning">🟡 黄色警告</label>
+                                <input type="checkbox" id="indextts-notify-warning"${settings.tavernNotifications?.warning !== false ? ' checked' : ''}>
+                            </div>
+                            <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-notify-error">🔴 红色错误</label>
+                                <input type="checkbox" id="indextts-notify-error"${settings.tavernNotifications?.error !== false ? ' checked' : ''}>
                             </div>
                         </div>
 
@@ -3073,8 +3126,26 @@
             }
         };
         bindCheckbox('#indextts-enable-inline', 'enableInline', true);
+        bindCheckbox('#indextts-frontend-card-compatibility', 'frontendCardCompatibility', true);
         bindCheckbox('#indextts-format-dialogue-display', 'formatDialogueDisplay', true);
         bindCheckbox('#indextts-auto-inference', 'autoInference', false);
+
+        const bindNotificationCheckbox = (id, field) => {
+            const el = panel.querySelector(id);
+            if (!el) return;
+            el.onchange = (e) => {
+                const s = getSettings();
+                if (!s.tavernNotifications || typeof s.tavernNotifications !== 'object') {
+                    s.tavernNotifications = JSON.parse(JSON.stringify(defaultSettings.tavernNotifications));
+                }
+                s.tavernNotifications[field] = e.target.checked;
+                saveSettings();
+            };
+        };
+        bindNotificationCheckbox('#indextts-notify-enabled', 'enabled');
+        bindNotificationCheckbox('#indextts-notify-success', 'success');
+        bindNotificationCheckbox('#indextts-notify-warning', 'warning');
+        bindNotificationCheckbox('#indextts-notify-error', 'error');
 
         // Voice
         const voiceInput = panel.querySelector('#indextts-voice');
@@ -3228,7 +3299,7 @@
         if (chooseBtn) {
             chooseBtn.onclick = async () => {
                 if (!window.showDirectoryPicker) {
-                    if (window.toastr) window.toastr.error('浏览器不支持 File System Access API');
+                    if (pluginToastr) pluginToastr.error('浏览器不支持 File System Access API');
                     return;
                 }
                 try {
@@ -3245,7 +3316,7 @@
                         // 3. Update UI
                         await updatePathUI();
 
-                        if (window.toastr) window.toastr.success(`已选定目录: ${h.name}`);
+                        if (pluginToastr) pluginToastr.success(`已选定目录: ${h.name}`);
                     }
                 } catch (e) {
                     if (e.name !== 'AbortError') console.error(e);
@@ -3258,10 +3329,10 @@
             authBtn.onclick = async () => {
                 const success = await LocalRepo.requestPermission();
                 if (success) {
-                    if (window.toastr) window.toastr.success('已获授权');
+                    if (pluginToastr) pluginToastr.success('已获授权');
                     await updatePathUI();
                 } else {
-                    if (window.toastr) window.toastr.warning('授权失败或被拒绝');
+                    if (pluginToastr) pluginToastr.warning('授权失败或被拒绝');
                 }
             };
         }
@@ -3272,13 +3343,13 @@
             scanImportBtn.onclick = async () => {
                 const h = LocalRepo.getHandle();
                 if (!h) {
-                    if (window.toastr) window.toastr.warning('请先点击【📂 选择】设置本地音频目录');
+                    if (pluginToastr) pluginToastr.warning('请先点击【📂 选择】设置本地音频目录');
                     return;
                 }
                 // Ensure permission
                 const hasPerm = await LocalRepo.requestPermission();
                 if (!hasPerm) {
-                    if (window.toastr) window.toastr.error('未获得读写权限，无法扫描');
+                    if (pluginToastr) pluginToastr.error('未获得读写权限，无法扫描');
                     await updatePathUI();
                     return;
                 }
@@ -3294,13 +3365,13 @@
             exportBtn.onclick = async () => {
                 const h = LocalRepo.getHandle();
                 if (!h) {
-                    if (window.toastr) window.toastr.warning('请先点击【📂 选择】设置本地音频目录');
+                    if (pluginToastr) pluginToastr.warning('请先点击【📂 选择】设置本地音频目录');
                     return;
                 }
                 // Ensure permission
                 const hasPerm = await LocalRepo.requestPermission();
                 if (!hasPerm) {
-                    if (window.toastr) window.toastr.error('未获得读写权限，无法导出');
+                    if (pluginToastr) pluginToastr.error('未获得读写权限，无法导出');
                     await updatePathUI();
                     return;
                 }
@@ -3316,7 +3387,7 @@
                 if (!window.confirm || window.confirm('确定要清空所有缓存的音频吗？')) {
                     await AudioStorage.clearAllAudios().catch(() => { });
                     clearMemoryAudioCache();
-                    if (window.toastr) window.toastr.success('已清空缓存池');
+                    if (pluginToastr) pluginToastr.success('已清空缓存池');
                     await updateAudioPoolStats();
                 }
             };
@@ -3353,7 +3424,7 @@
                 const nameEl = panel.querySelector('#indextts-preset-name');
                 const name = (nameEl?.value || '').trim();
                 if (!name) {
-                    if (window.toastr) window.toastr.warning('请输入预设名称');
+                    if (pluginToastr) pluginToastr.warning('请输入预设名称');
                     return;
                 }
                 // 深拷贝当前活跃预设数据 保存到目标名称
@@ -3361,7 +3432,7 @@
                 root.selected_preset = name;
                 saveSettings();
                 populatePresetUI();
-                if (window.toastr) window.toastr.success(`预设 "${name}" 已保存`);
+                if (pluginToastr) pluginToastr.success(`预设 "${name}" 已保存`);
             };
         }
 
@@ -3372,7 +3443,7 @@
                 const root = getRootSettings();
                 const keys = Object.keys(root.presets);
                 if (keys.length <= 1) {
-                    if (window.toastr) window.toastr.warning('至少需要保留一个预设');
+                    if (pluginToastr) pluginToastr.warning('至少需要保留一个预设');
                     return;
                 }
                 const current = root.selected_preset;
@@ -3380,7 +3451,7 @@
                 delete root.presets[current];
                 // 切换到第一个剩余预设
                 switchPreset(Object.keys(root.presets)[0]);
-                if (window.toastr) window.toastr.success(`已删除预设 "${current}"`);
+                if (pluginToastr) pluginToastr.success(`已删除预设 "${current}"`);
             };
         }
 
@@ -3521,7 +3592,7 @@
 
     async function importFromLocalDirectory(providedHandle) {
         if (!window.showDirectoryPicker) {
-            if (window.toastr) window.toastr.error('当前浏览器不支持 File System Access API');
+            if (pluginToastr) pluginToastr.error('当前浏览器不支持 File System Access API');
             return;
         }
         try {
@@ -3529,7 +3600,7 @@
             // const dirHandle = await window.showDirectoryPicker();
             const fileHandles = await getAllAudioFilesFromDir(dirHandle);
             if (!fileHandles.length) {
-                if (window.toastr) window.toastr.info('该目录下未发现 .wav / .mp3 / .ogg 文件');
+                if (pluginToastr) pluginToastr.info('该目录下未发现 .wav / .mp3 / .ogg 文件');
                 return;
             }
             let imported = 0;
@@ -3571,28 +3642,28 @@
                 } catch (e) {
                     console.warn('[IndexTTS2] import file error:', f.name, e);
                 }
-                if (window.toastr && (i + 1) % 10 === 0) {
-                    window.toastr.info(`正在导入: ${i + 1}/${fileHandles.length}`);
+                if (pluginToastr && (i + 1) % 10 === 0) {
+                    pluginToastr.info(`正在导入: ${i + 1}/${fileHandles.length}`);
                 }
             }
-            if (window.toastr) window.toastr.success(`同步完成：新增 ${imported} 条，跳过已存在 ${skipped} 条`);
+            if (pluginToastr) pluginToastr.success(`同步完成：新增 ${imported} 条，跳过已存在 ${skipped} 条`);
         } catch (e) {
             if (e.name === 'AbortError') return;
             console.error('[IndexTTS2] importFromLocalDirectory error:', e);
-            if (window.toastr) window.toastr.error('导入失败: ' + e.message);
+            if (pluginToastr) pluginToastr.error('导入失败: ' + e.message);
         }
     }
 
     async function exportAudioCacheToFolder(providedHandle) {
         if (!AudioStorage || !AudioStorage.getAllAudios) return;
         if (!window.showDirectoryPicker) {
-            if (window.toastr) window.toastr.error('当前浏览器不支持 File System Access API');
+            if (pluginToastr) pluginToastr.error('当前浏览器不支持 File System Access API');
             return;
         }
         try {
             const records = await AudioStorage.getAllAudios();
             if (!records.length) {
-                if (window.toastr) window.toastr.info('暂无可导出的缓存音频');
+                if (pluginToastr) pluginToastr.info('暂无可导出的缓存音频');
                 return;
             }
             const dirHandle = providedHandle || await window.showDirectoryPicker();
@@ -3610,14 +3681,14 @@
                 await writable.write(rec.blob);
                 await writable.close();
 
-                if (window.toastr && idx % 5 === 0) {
-                    window.toastr.info(`导出进度: ${idx}/${records.length}`);
+                if (pluginToastr && idx % 5 === 0) {
+                    pluginToastr.info(`导出进度: ${idx}/${records.length}`);
                 }
             }
-            if (window.toastr) window.toastr.success(`导出完成，共 ${records.length} 条`);
+            if (pluginToastr) pluginToastr.success(`导出完成，共 ${records.length} 条`);
         } catch (e) {
             console.error('[IndexTTS2] exportAudioCacheToFolder error:', e);
-            if (window.toastr) window.toastr.error('导出失败: ' + e.message);
+            if (pluginToastr) pluginToastr.error('导出失败: ' + e.message);
         }
     }
 
@@ -3792,7 +3863,7 @@
                 const list = await AudioStorage.getAllAudios();
                 if (!list || list.length === 0) {
                     console.log('[IndexTTS2] 缓存池为空，建议在设置中执行「扫描本地目录同步至缓存」以节省推理算力');
-                    if (window.toastr) window.toastr.info('缓存池为空，建议执行「扫描本地目录同步至缓存」以节省算力');
+                    if (pluginToastr) pluginToastr.info('缓存池为空，建议执行「扫描本地目录同步至缓存」以节省算力');
                 }
             } catch (e) { }
         }, 800);
