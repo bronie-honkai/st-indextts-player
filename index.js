@@ -106,6 +106,7 @@
         volume: 1.0,
         parsingMode: 'gal', // 'gal' | 'audiobook'
         enableInline: true, // 启用行内增强渲染
+        formatDialogueDisplay: true, // 仅将聊天气泡显示为“人名：「内容」”，不修改原始消息
         autoInference: false, // 回复后自动推理
         cacheImportPath: '\\\\SillyTavern\\\\data\\\\TTSsound',
         // VN format: [角色|表情]|「对话」 or [旁白]|描述
@@ -800,6 +801,15 @@
 
     // ==================== VN / Audiobook Parsing ====================
     // 兼容: [角色|表情]|「对话」、[角色][表情] 对话、[角色] 内容（无引号），宽松空白
+    function normalizeProtocolLine(text) {
+        let line = (text || '').trim();
+        // 兼容整行被 Markdown 加粗包裹的协议文本。
+        if (line.startsWith('**') && line.endsWith('**') && line.length >= 4) {
+            line = line.slice(2, -2).trim();
+        }
+        return line;
+    }
+
     function parseVNLine(text) {
         try {
             const settings = getSettings();
@@ -807,7 +817,7 @@
 
             if (mode !== 'gal') return null;
 
-            const trimmed = (text || '').trim().replace(/\s+/g, ' ').trim();
+            const trimmed = normalizeProtocolLine(text).replace(/\s+/g, ' ').trim();
             if (!trimmed) return null;
 
             // 提取可选的情感向量 [数字,数字,...]
@@ -885,13 +895,13 @@
         const targetLang = String(dubbing.language || 'JA').toUpperCase();
 
         for (let i = 0; i < lines.length; i++) {
-            const original = lines[i].trim();
+            const original = normalizeProtocolLine(lines[i]);
             if (!original || VOICE_LINE_REGEX.test(original)) continue;
             const parsed = parseVNLine(original);
             if (!parsed) continue;
 
             let dubbedText = '';
-            const nextLine = (lines[i + 1] || '').trim();
+            const nextLine = normalizeProtocolLine(lines[i + 1]);
             const voiceMatch = nextLine.match(VOICE_LINE_REGEX);
             if (voiceMatch && voiceMatch[1].toUpperCase() === targetLang) {
                 dubbedText = voiceMatch[2].trim();
@@ -974,12 +984,13 @@
 
     function getMergedCharacterList() {
         const characters = new Set();
-        // 1. History
-        document.querySelectorAll('.mes[is_user="false"] .mes_text').forEach(mesText => {
-            (mesText.innerText || '').split('\n').forEach(line => {
-                const parsed = parseVNLine(line.trim());
-                if (parsed?.character && !['旁白', 'Narrator'].includes(parsed.character)) {
-                    characters.add(parsed.character);
+        // 1. History：始终读取酒馆原始消息，避免显示美化后丢失协议头。
+        document.querySelectorAll('.mes[is_user="false"]').forEach(msg => {
+            const sourceText = applyRegexFilters(getRawMessageText(msg));
+            parseMessageVoicePairs(sourceText).forEach(item => {
+                const character = item.parsed?.character;
+                if (character && !['旁白', 'Narrator'].includes(character)) {
+                    characters.add(character);
                 }
             });
         });
@@ -1559,6 +1570,83 @@
     }
 
     // ==================== Message UI Injection ====================
+    function buildDialogueDisplayText(rawText) {
+        const lines = (rawText || '').replace(/\r/g, '').split('\n');
+        const displayLines = [];
+
+        for (const rawLine of lines) {
+            const protocolLine = normalizeProtocolLine(rawLine);
+            if (VOICE_LINE_REGEX.test(protocolLine)) continue;
+
+            const parsed = parseVNLine(protocolLine);
+            if (parsed && !parsed.isAction) {
+                displayLines.push(`${parsed.character}：「${parsed.dialogue}」`);
+            } else {
+                displayLines.push(rawLine);
+            }
+        }
+
+        return displayLines.join('\n').replace(/\n{3,}/g, '\n\n');
+    }
+
+    function restoreMessageDisplay(msg) {
+        const mesText = msg?.querySelector('.mes_text');
+        if (!mesText || mesText.dataset.indexttsDialogueDisplay !== 'true') return;
+
+        try {
+            const mesId = getMessageId(msg);
+            const ctx = getContext();
+            const entry = ctx?.chat?.[parseInt(mesId, 10)];
+            if (entry && typeof ctx?.updateMessageBlock === 'function') {
+                ctx.updateMessageBlock(parseInt(mesId, 10), entry);
+            }
+        } catch (e) {
+            console.warn('[IndexTTS2] restore message display failed:', e);
+        }
+
+        const currentMesText = msg.querySelector('.mes_text');
+        if (currentMesText) delete currentMesText.dataset.indexttsDialogueDisplay;
+    }
+
+    function applyDialogueDisplay(msg, force = false) {
+        let mesText = msg?.querySelector('.mes_text');
+        if (!mesText) return;
+
+        const settings = getSettings();
+        if (settings.formatDialogueDisplay === false || settings.parsingMode !== 'gal') {
+            restoreMessageDisplay(msg);
+            return;
+        }
+        if (!force && mesText.dataset.indexttsDialogueDisplay === 'true') return;
+
+        try {
+            const mesId = getMessageId(msg);
+            const ctx = getContext();
+            const entry = ctx?.chat?.[parseInt(mesId, 10)];
+            const rawText = entry && typeof entry.mes === 'string' ? entry.mes : getRawMessageText(msg);
+            const displayText = buildDialogueDisplayText(rawText);
+            if (!displayText || displayText === rawText) return;
+
+            if (typeof ctx?.messageFormatting === 'function') {
+                mesText.innerHTML = ctx.messageFormatting(
+                    displayText,
+                    entry?.name || '',
+                    !!entry?.is_system,
+                    !!entry?.is_user,
+                    parseInt(mesId, 10),
+                    {},
+                    false,
+                );
+            } else {
+                mesText.textContent = displayText;
+            }
+            mesText.dataset.indexttsDialogueDisplay = 'true';
+            delete mesText.dataset.indexttsInjected;
+        } catch (e) {
+            console.warn('[IndexTTS2] dialogue display formatting failed:', e);
+        }
+    }
+
     function injectMessageButtons(msg) {
         if (msg.querySelector('.indextts-msg-btns')) return;
         const btns = msg.querySelector('.mes_buttons');
@@ -1635,6 +1723,8 @@
             const langEnc = vn.lang || 'ZH';
 
             // 仅在原 HTML 中查找「带引号的对话」部分（第二组）
+            // 酒馆可能分别渲染角色名和引号内容，整行 HTML 不一定连续。
+            // 只匹配稳定存在的「对话内容」，显示美化开启或关闭时都可注入播放按钮。
             const dialogueContent = vn.parsed.rawContent;
             if (!dialogueContent) continue;
 
@@ -2728,6 +2818,7 @@
 
     function refreshAllMessages() {
         document.querySelectorAll('.mes[is_user="false"]').forEach(msg => {
+            restoreMessageDisplay(msg);
             // Remove old inline elements and re-inject
             const mesText = msg.querySelector('.mes_text');
             if (mesText) {
@@ -2741,6 +2832,7 @@
                 });
                 delete mesText.dataset.indexttsInjected;
             }
+            applyDialogueDisplay(msg, true);
             injectMessageButtons(msg);
             injectInlineButtons(msg, true);
         });
@@ -2884,6 +2976,10 @@
                                 <label for="indextts-enable-inline">启用行内增强渲染</label>
                                 <input type="checkbox" id="indextts-enable-inline"${settings.enableInline !== false ? ' checked' : ''}>
                             </div>
+                            <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-format-dialogue-display">对话显示为“人名：「内容」”</label>
+                                <input type="checkbox" id="indextts-format-dialogue-display"${settings.formatDialogueDisplay !== false ? ' checked' : ''}>
+                            </div>
                              <div class="indextts-setting-row checkbox-row">
                                 <label for="indextts-auto-inference">回复后自动推理</label>
                                 <input type="checkbox" id="indextts-auto-inference"${settings.autoInference === true ? ' checked' : ''}>
@@ -2977,6 +3073,7 @@
             }
         };
         bindCheckbox('#indextts-enable-inline', 'enableInline', true);
+        bindCheckbox('#indextts-format-dialogue-display', 'formatDialogueDisplay', true);
         bindCheckbox('#indextts-auto-inference', 'autoInference', false);
 
         // Voice
@@ -3540,6 +3637,7 @@
                             if (msg) {
                                 const mesText = msg.querySelector('.mes_text');
                                 if (mesText) delete mesText.dataset.indexttsInjected;
+                                applyDialogueDisplay(msg, true);
                                 injectMessageButtons(msg);
                                 injectInlineButtons(msg, true);
                             }
@@ -3638,6 +3736,7 @@
 
         document.querySelectorAll('.mes[is_user="false"]').forEach(msg => {
             injectMessageButtons(msg);
+            applyDialogueDisplay(msg);
 
             // Force re-inject if inline buttons are missing
             const mesText = msg.querySelector('.mes_text');
