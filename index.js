@@ -741,6 +741,29 @@
         return `fallback_${hash.toString(16)}`;
     }
 
+    // 为“先推理后播放”生成当前句子的完整差异键。
+    // 文本、角色、音色、情感向量、语言或播放参数变化时，都会得到新键。
+    async function generateInferenceLineHash(line) {
+        const settings = getSettings();
+        const normVoice = ensureWavSuffix(line.voice || settings.defaultVoice);
+        const speed = parseFloat(settings.speed || 1.0) || 1.0;
+        const volume = parseFloat(settings.volume || 1.0) || 1.0;
+        const durationFactor = parseFloat(settings.durationFactor || 1.0) || 1.0;
+        const emoAlpha = parseFloat(settings.emoAlpha ?? 0.6);
+        const useRandom = settings.useRandom === true;
+        const lang = String(line.lang || 'ZH').toUpperCase();
+
+        return generateHash(
+            line.character || 'Unknown',
+            normVoice,
+            line.text,
+            speed,
+            volume,
+            line.emotion || null,
+            { lang, durationFactor, emoAlpha, useRandom },
+        );
+    }
+
     // ==================== Audio Transcoding ====================
     async function convertToWav(file) {
         console.log(`[IndexTTS2] Converting: ${file.name} (${file.type}, ${file.size} bytes)`);
@@ -1154,7 +1177,12 @@
         if (mesId && audioCache[mesId]) {
             const cleanText = text.trim();
             // 查找完全匹配的文本内容记录
-            const recordInCache = audioCache[mesId].find(r => r.text === cleanText);
+            const requestedEmotion = emotion || null;
+            const recordInCache = audioCache[mesId].find(r =>
+                r.text === cleanText
+                && (r.emotion || null) === requestedEmotion
+                && String(r.lang || 'ZH').toUpperCase() === lang
+            );
             if (recordInCache && recordInCache.blobUrl) {
                 console.log('[IndexTTS2] Memory Cache Hit for playSingleLine:', mesId);
                 // 直接使用已有的 blobUrl 播放，绕过磁盘 IO 和 API
@@ -1163,6 +1191,7 @@
                     msg,
                     encT,
                     encC,
+                    lineEl: ctx.lineEl || null,
                     character,
                     text: cleanText,
                     volume: ctx.volume
@@ -1186,6 +1215,7 @@
             msg,
             encT,
             encC,
+            lineEl: ctx.lineEl || null,
             character,
             text,
             volume: record.volume,
@@ -1196,7 +1226,7 @@
     /**
      * Helper to handle audio playback from a known record or URL
      */
-    async function playAudioFromRecord({ blobUrl, msg, encT, encC, character, text, volume, shouldRevoke = false }) {
+    async function playAudioFromRecord({ blobUrl, msg, encT, encC, lineEl = null, character, text, volume, shouldRevoke = false }) {
         const audio = new Audio(blobUrl);
         const settings = getSettings();
         const vol = isNaN(volume) ? (settings.volume || 1.0) : Math.max(0, Math.min(1, volume));
@@ -1205,7 +1235,7 @@
         // 高亮当前行
         if (msg) {
             clearPlayingInMessage(msg);
-            setLinePlayingByEncoded(msg, encT, encC, true);
+            setLinePlayingByEncoded(msg, encT, encC, true, lineEl);
         }
 
         if (currentPlayback.audio) {
@@ -1228,7 +1258,7 @@
         const cleanup = () => {
             if (shouldRevoke) URL.revokeObjectURL(blobUrl);
             if (msg) {
-                setLinePlayingByEncoded(msg, encT, encC, false);
+                setLinePlayingByEncoded(msg, encT, encC, false, lineEl);
             }
         };
 
@@ -1670,19 +1700,32 @@
     }
 
     function injectMessageButtons(msg) {
-        if (msg.querySelector('.indextts-msg-btns')) return;
         const btns = msg.querySelector('.mes_buttons');
         if (!btns) return;
 
-        const group = document.createElement('div');
-        group.className = 'indextts-msg-btns mes_button_row';
-        group.innerHTML = `
-            <div class="mes_button indextts-play" title="播放整楼层"><i class="fa-solid fa-volume-high"></i></div>
-            <div class="mes_button indextts-infer" title="先推理后播放"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
-            <div class="mes_button indextts-cfg" title="配置"><i class="fa-solid fa-cog"></i></div>
-        `;
+        let group = msg.querySelector('.indextts-msg-btns');
+        const groupIsComplete = group
+            && group.querySelector('.indextts-play')
+            && group.querySelector('.indextts-infer')
+            && group.querySelector('.indextts-cfg');
+
+        // 酒馆在编辑、切楼或重新渲染消息时可能保留外壳却丢掉按钮/事件。
+        // 发现残缺组件就完整重建；组件存在时也重新绑定三个入口。
+        if (!groupIsComplete) {
+            if (group) group.remove();
+            group = document.createElement('div');
+            group.className = 'indextts-msg-btns mes_button_row';
+            group.innerHTML = `
+                <div class="mes_button indextts-play" title="播放整楼层"><i class="fa-solid fa-volume-high"></i></div>
+                <div class="mes_button indextts-infer" title="先推理后播放"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
+                <div class="mes_button indextts-cfg" title="配置"><i class="fa-solid fa-cog"></i></div>
+            `;
+            btns.appendChild(group);
+        }
+
         const playBtn = group.querySelector('.indextts-play');
         const inferBtn = group.querySelector('.indextts-infer');
+        const configBtn = group.querySelector('.indextts-cfg');
         if (playBtn) {
             playBtn.onclick = e => { e.stopPropagation(); playMessageQueue(msg, playBtn); };
             setupMiniPlayerHover(playBtn);
@@ -1690,8 +1733,9 @@
         if (inferBtn) {
             inferBtn.onclick = e => { e.stopPropagation(); inferMessageAudios(msg, inferBtn); };
         }
-        group.querySelector('.indextts-cfg').onclick = e => { e.stopPropagation(); showConfigPopup(); };
-        btns.appendChild(group);
+        if (configBtn) {
+            configBtn.onclick = e => { e.stopPropagation(); showConfigPopup(); };
+        }
     }
 
     function injectInlineButtons(msg, force = false) {
@@ -1753,12 +1797,17 @@
             // Escape special regex characters
             const escapedDialogue = dialogueContent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-            // Find and wrap the dialogue text（避免重复包裹）
-            const dialogueRegex = new RegExp(`(${escapedDialogue})(?![^<]*indextts-dialogue)`, 'g');
+            // 每条协议只绑定一个尚未包装的文本节点；相同文本也按出现顺序逐句绑定。
+            const dialogueRegex = new RegExp(`(${escapedDialogue})`, 'g');
+            let wrappedCurrentLine = false;
 
-            html = html.replace(dialogueRegex, (match) => {
-                // 不重复包裹已经含有 indextts-dialogue 的片段
-                if (match.includes('indextts-dialogue')) return match;
+            html = html.replace(dialogueRegex, (match, _capture, offset, source) => {
+                if (wrappedCurrentLine) return match;
+                const before = source.slice(0, offset);
+                const lastOpen = before.lastIndexOf('<span class="indextts-dialogue"');
+                const lastClose = before.lastIndexOf('</span>');
+                if (lastOpen > lastClose) return match;
+                wrappedCurrentLine = true;
                 modified = true;
 
                 return `<span class="indextts-dialogue" data-t="${enc}" data-v="${vn.voice || ''}" data-c="${charEnc}" data-e="${emotionEnc}" data-lang="${langEnc}" title="点击播放">${match}</span><span class="indextts-inline-play" data-t="${enc}" data-v="${vn.voice || ''}" data-c="${charEnc}" data-e="${emotionEnc}" data-lang="${langEnc}" title="播放"><i class="fa-solid fa-play fa-xs"></i></span>`;
@@ -1780,7 +1829,7 @@
                     const emotion = span.dataset.e || null;
                     const lang = span.dataset.lang || 'ZH';
                     const msgEl = span.closest('.mes');
-                    playSingleLine(text, voice, character, { msg: msgEl, encT: span.dataset.t, encC: span.dataset.c, emotion, lang });
+                    playSingleLine(text, voice, character, { msg: msgEl, encT: span.dataset.t, encC: span.dataset.c, emotion, lang, lineEl: span });
                 };
             });
 
@@ -1796,7 +1845,7 @@
                     const emotion = btn.dataset.e || null;
                     const lang = btn.dataset.lang || 'ZH';
                     const msgEl = btn.closest('.mes');
-                    playSingleLine(text, voice, character, { msg: msgEl, encT: btn.dataset.t, encC: btn.dataset.c, emotion, lang });
+                    playSingleLine(text, voice, character, { msg: msgEl, encT: btn.dataset.t, encC: btn.dataset.c, emotion, lang, lineEl: btn });
                 };
             });
         }
@@ -1917,8 +1966,18 @@
         });
     }
 
-    function setLinePlayingByEncoded(msg, encT, encC, isPlaying) {
+    function setLinePlayingByEncoded(msg, encT, encC, isPlaying, lineEl = null) {
         if (!msg || !encT) return;
+        if (lineEl && msg.contains(lineEl)) {
+            const pair = [lineEl];
+            if (lineEl.classList.contains('indextts-dialogue') && lineEl.nextElementSibling?.classList.contains('indextts-inline-play')) {
+                pair.push(lineEl.nextElementSibling);
+            } else if (lineEl.classList.contains('indextts-inline-play') && lineEl.previousElementSibling?.classList.contains('indextts-dialogue')) {
+                pair.push(lineEl.previousElementSibling);
+            }
+            pair.forEach(el => el.classList.toggle('playing', isPlaying));
+            return;
+        }
         const selectorDialogue = `.indextts-dialogue[data-t="${encT}"]` + (encC ? `[data-c="${encC}"]` : '');
         const selectorBtn = `.indextts-inline-play[data-t="${encT}"]` + (encC ? `[data-c="${encC}"]` : '');
         msg.querySelectorAll(`${selectorDialogue}, ${selectorBtn}`).forEach(el => {
@@ -2520,12 +2579,7 @@
     async function inferMessageAudios(msg, triggerBtn, isSilent = false) {
         if (!msg) return;
         const mesId = getMessageId(msg);
-        if (!mesId) return;
-
-        // 已有缓存则直接使用
-        if (audioCache[mesId] && audioCache[mesId].length) {
-            return audioCache[mesId];
-        }
+        if (mesId === null || mesId === undefined) return;
 
         // 推理锁：防止重复请求
         if (inferenceLocks.has(mesId)) {
@@ -2553,9 +2607,11 @@
         try {
             const cardId = getCardId();
             const lines = collectVNLinesFromMessage(msg);
+            const previousList = Array.isArray(audioCache[mesId]) ? audioCache[mesId] : [];
             const list = [];
             const unvoicedCount = lines.filter(l => !l.voice).length;
             let cachedCount = 0;
+            let reusedCount = 0;
 
             if (!lines.length) {
                 if (!isSilent && pluginToastr) pluginToastr.warning('未在消息中发现符合格式的 [角色] 文本，请检查是否为 GAL 模式及剧本格式');
@@ -2565,6 +2621,25 @@
                 for (const line of lines) {
                     try {
                         if (!line.voice) continue;
+
+                        const lineHash = await generateInferenceLineHash(line);
+                        const previous = previousList.find(item => item.hash === lineHash && item.blobUrl);
+
+                        // 当前句子完全未变化：复用内存 Blob，不重复请求，也不重复创建 URL。
+                        if (previous) {
+                            list.push({
+                                ...previous,
+                                text: line.text,
+                                displayText: line.displayText || line.text,
+                                character: line.character,
+                                voice: line.voice,
+                                emotion: line.emotion || null,
+                                lang: line.lang || 'ZH',
+                                hash: lineHash,
+                            });
+                            reusedCount++;
+                            continue;
+                        }
 
                         const record = await ensureAudioRecord({
                             text: line.text,
@@ -2581,8 +2656,9 @@
                             displayText: line.displayText || line.text,
                             character: line.character,
                             voice: line.voice,
+                            emotion: line.emotion || null,
                             lang: line.lang || 'ZH',
-                            hash: record.hash,
+                            hash: lineHash,
                             blobUrl,
                         });
                     } catch (e) {
@@ -2591,19 +2667,34 @@
                 }
             }
 
+            // 当前正文中已删除的句子不再留在本楼播放队列，释放其 Blob URL。
+            const retainedUrls = new Set(list.map(item => item.blobUrl).filter(Boolean));
+            previousList.forEach(item => {
+                if (item?.blobUrl && !retainedUrls.has(item.blobUrl)) {
+                    try { URL.revokeObjectURL(item.blobUrl); } catch (e) { }
+                }
+            });
+
             audioCache[mesId] = list;
 
             if (list.length) {
                 const playBtn = msg.querySelector('.indextts-play');
                 if (playBtn) playBtn.classList.add('indextts-prepared');
                 if (pluginToastr && !isSilent) {
-                    let msgStr = cachedCount === list.length ? `已从缓存装载 ${list.length} 句音频` : `已推理 ${list.length} 句音频`;
+                    let msgStr = reusedCount === list.length
+                        ? `已复用 ${list.length} 句未变化音频`
+                        : `已推理 ${list.length - reusedCount} 句，复用 ${reusedCount} 句`;
+                    if (cachedCount === list.length && reusedCount === 0) {
+                        msgStr = `已从缓存装载 ${list.length} 句音频`;
+                    }
                     if (unvoicedCount > 0 && unvoicedCount < lines.length) {
                         pluginToastr.success(`${msgStr}，${unvoicedCount} 句未配置配音已跳过`);
                     } else {
                         pluginToastr.success(msgStr);
                     }
                 }
+            } else if (!isSilent && lines.length && pluginToastr) {
+                pluginToastr.warning('当前楼层没有已配置音色的可朗读台词');
             }
 
             return list;
@@ -3708,6 +3799,8 @@
                             if (msg) {
                                 const mesText = msg.querySelector('.mes_text');
                                 if (mesText) delete mesText.dataset.indexttsInjected;
+                                const playBtn = msg.querySelector('.indextts-play');
+                                if (playBtn) playBtn.classList.remove('indextts-prepared');
                                 applyDialogueDisplay(msg, true);
                                 injectMessageButtons(msg);
                                 injectInlineButtons(msg, true);
@@ -3805,7 +3898,20 @@
         ensureCssLoaded();
         injectSettingsPanel();
 
-        document.querySelectorAll('.mes[is_user="false"]').forEach(msg => {
+        document.querySelectorAll('.mes').forEach(msg => {
+            // AI 楼层保持原行为；用户楼层仅在确实包含可配音台词时注入按钮。
+            // 这样手动粘贴/编辑的情感向量测试文本也能播放，同时不会污染普通用户提示。
+            if (msg.getAttribute('is_user') === 'true') {
+                const rawText = getRawMessageText(msg);
+                const hasExplicitVoiceScript = /(?:^|\n)\s*\[[^\]\r\n]+\](?:\[[^\]\r\n]+\])?\s*\|/.test(rawText)
+                    || /(?:^|\n)\s*@VOICE-[A-Z0-9_-]+\s*:/i.test(rawText);
+                if (!hasExplicitVoiceScript || collectVNLinesFromMessage(msg).length === 0) {
+                    msg.querySelector('.indextts-msg-btns')?.remove();
+                    return;
+                }
+                injectMessageButtons(msg);
+                return;
+            }
             injectMessageButtons(msg);
             applyDialogueDisplay(msg);
 
