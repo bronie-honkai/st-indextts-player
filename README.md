@@ -58,9 +58,13 @@ AI 生成回复
 
 ### 演示视频
 
-- IndexTTS 2.0：
-  https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
-- IndexTTS 2.5：[下载/播放演示视频](demo/IndexTTS-2.5-demo.mp4)
+#### IndexTTS 2.0
+
+https://github.com/user-attachments/assets/4f1c4372-fd90-4389-ae66-70f506b5edb8
+
+#### IndexTTS 2.5
+
+https://github.com/user-attachments/assets/1c98d280-cc3a-4015-a7fe-4133d2cc58e8
 
 
 
