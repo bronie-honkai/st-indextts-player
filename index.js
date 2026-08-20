@@ -96,7 +96,6 @@
     // ==================== Default Settings ====================
     const defaultSettings = {
         apiUrl: 'http://127.0.0.1:7880/v1/audio/speech',
-        cloningUrl: 'http://127.0.0.1:7880/api/v1/indextts2_cloning',
         model: 'index-tts2',
         defaultVoice: 'default.wav',
         speed: 1.0,
@@ -423,10 +422,22 @@
         filename = filename.trim();
         if (!filename.toLowerCase().endsWith('.wav') &&
             !filename.toLowerCase().endsWith('.mp3') &&
-            !filename.toLowerCase().endsWith('.ogg')) {
+            !filename.toLowerCase().endsWith('.ogg') &&
+            !filename.toLowerCase().endsWith('.flac') &&
+            !filename.toLowerCase().endsWith('.m4a')) {
             return filename + '.wav';
         }
         return filename;
+    }
+
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, character => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;',
+        })[character]);
     }
 
     function ensureCssLoaded() {
@@ -1280,42 +1291,151 @@
         return playSingleLine(text, voiceFile, '', {});
     }
 
-    // ==================== Voice Cloning ====================
-    async function cloneVoice(characterName, base64Audio) {
+    // ==================== Server Voice Library ====================
+    function getVoiceLibraryUrl() {
         const settings = getSettings();
-        console.log(`[IndexTTS2] Clone: ${characterName}, base64 len=${base64Audio.length}`);
+        let url;
+        try {
+            url = new URL(settings.apiUrl, window.location.href);
+        } catch (error) {
+            throw new Error('TTS 服务地址无效');
+        }
+
+        const speechPath = /\/v1\/audio\/speech\/?$/i;
+        url.pathname = speechPath.test(url.pathname)
+            ? url.pathname.replace(speechPath, '/api/v1/voices')
+            : '/api/v1/voices';
+        url.search = '';
+        url.hash = '';
+        return url.toString();
+    }
+
+    async function getVoiceApiError(response) {
+        const text = await response.text().catch(() => '');
+        if (!text) return `HTTP ${response.status}`;
+        try {
+            const data = JSON.parse(text);
+            return data.detail || data.message || `HTTP ${response.status}`;
+        } catch (error) {
+            return text;
+        }
+    }
+
+    async function fetchServerVoices() {
+        const response = await fetch(getVoiceLibraryUrl(), {
+            method: 'GET',
+            mode: 'cors',
+            cache: 'no-store',
+        });
+        if (!response.ok) {
+            const error = new Error(await getVoiceApiError(response));
+            error.status = response.status;
+            throw error;
+        }
+
+        const payload = await response.json();
+        const rawVoices = Array.isArray(payload) ? payload : payload?.data;
+        if (!Array.isArray(rawVoices)) throw new Error('服务器返回的参考音频列表格式无效');
+
+        const voices = [];
+        const seen = new Set();
+        for (const item of rawVoices) {
+            const id = String(typeof item === 'string' ? item : item?.id || '').trim();
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            voices.push({
+                id,
+                name: String(typeof item === 'string' ? item.split('/').pop() : item?.name || id),
+                format: String(typeof item === 'string' ? '' : item?.format || ''),
+            });
+        }
+        return voices.sort((left, right) => left.id.localeCompare(right.id, 'zh-CN'));
+    }
+
+    async function uploadServerVoice(filename, base64Audio, overwrite = false) {
+        const response = await fetch(getVoiceLibraryUrl(), {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filename,
+                audio_base64: base64Audio,
+                overwrite,
+            }),
+        });
+
+        if (!response.ok) {
+            const error = new Error(await getVoiceApiError(response));
+            error.status = response.status;
+            throw error;
+        }
+
+        const data = await response.json();
+        const id = String(data?.id || '').trim();
+        if (!id) throw new Error('服务器没有返回参考音频 ID');
+        return {
+            id,
+            name: String(data.name || id.split('/').pop() || id),
+            format: String(data.format || 'wav'),
+        };
+    }
+
+    function getUploadedWavFilename(file) {
+        const originalName = String(file?.name || 'reference').replace(/\.[^./\\]+$/, '');
+        const safeName = originalName
+            .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+            .replace(/[ .]+$/g, '')
+            .trim()
+            .slice(0, 180);
+        return `${safeName || 'reference'}.wav`;
+    }
+
+    async function handleUpload(char, file, dropText, dropArea) {
+        if (file.size > 50 * 1024 * 1024) {
+            if (pluginToastr) pluginToastr.error('上传失败：源音频不能超过 50 MiB');
+            return null;
+        }
+
+        if (dropText) {
+            dropText.textContent = '正在转码并上传...';
+            dropText.className = 'indextts-drop-text uploading';
+        }
+        if (dropArea) dropArea.setAttribute('aria-busy', 'true');
 
         try {
-            const res = await fetch(settings.cloningUrl, {
-                method: 'POST',
-                mode: 'cors',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name: characterName,
-                    description: 'ST Clone',
-                    speaker_file_base64: base64Audio
-                })
-            });
-
-            const text = await res.text();
-            console.log(`[IndexTTS2] Clone response: ${res.status}`, text);
-
-            if (!res.ok) {
-                if (pluginToastr) pluginToastr.error(`克隆失败 HTTP ${res.status}`);
-                return null;
+            const base64Audio = await convertToWav(file);
+            const filename = getUploadedWavFilename(file);
+            let uploaded;
+            try {
+                uploaded = await uploadServerVoice(filename, base64Audio, false);
+            } catch (error) {
+                if (error.status !== 409) throw error;
+                if (!confirm(`服务器已存在 "${filename}"，是否覆盖？`)) {
+                    if (dropText) {
+                        dropText.textContent = '已取消上传';
+                        dropText.className = 'indextts-drop-text';
+                    }
+                    return null;
+                }
+                uploaded = await uploadServerVoice(filename, base64Audio, true);
             }
-
-            const data = JSON.parse(text);
-            const id = data.id || data.voice_id || data.filename || data.name;
-            if (id) {
-                if (pluginToastr) pluginToastr.success(`克隆成功: ${id}`);
-                return id;
+            if (dropText) {
+                dropText.textContent = uploaded.id;
+                dropText.className = 'indextts-drop-text success';
             }
+            if (pluginToastr) pluginToastr.success(`参考音频已上传: ${uploaded.id}`);
+            return uploaded;
+        } catch (error) {
+            console.error(`[IndexTTS2] Voice upload failed for ${char}:`, error);
+            if (dropText) {
+                dropText.textContent = '上传失败';
+                dropText.title = error.message;
+                dropText.className = 'indextts-drop-text error';
+            }
+            if (pluginToastr) pluginToastr.error('上传失败: ' + error.message);
             return null;
-        } catch (e) {
-            console.error('[IndexTTS2] Clone Error:', e);
-            if (pluginToastr) pluginToastr.error('克隆失败: ' + e.message);
-            return null;
+        } finally {
+            if (dropArea) dropArea.removeAttribute('aria-busy');
         }
     }
 
@@ -1325,28 +1445,76 @@
         const cardName = getCardName();
         const cardStore = getVoiceCardStore();
         let voiceMap = getVoiceMap();
+        let serverVoices = [];
+        let voiceLibraryState = 'loading';
+        let voiceLibraryMessage = '正在读取服务器参考音频...';
+        const manualVoiceCharacters = new Set();
+        const manualVoiceValue = '__indextts_manual_voice__';
+        const voiceRefreshIntervalMs = 15000;
+
+        const renderVoiceControl = (char, voice) => {
+            const safeChar = escapeHtml(char);
+            const currentVoice = String(voice || '');
+            if (manualVoiceCharacters.has(char)) {
+                const returnToListButton = voiceLibraryState === 'ready'
+                    ? `<button type="button" class="indextts-voice-list-btn" title="返回服务器参考音频列表" aria-label="返回服务器参考音频列表"><i class="fa-solid fa-list"></i></button>`
+                    : '';
+                return `<div class="indextts-manual-voice-control">
+                    <input type="text" class="indextts-voice-input text_pole" data-char="${safeChar}" value="${escapeHtml(currentVoice)}" placeholder="手动填写文件名.wav">
+                    ${returnToListButton}
+                </div>`;
+            }
+            if (voiceLibraryState === 'loading') {
+                return `<select class="indextts-voice-select text_pole" data-char="${safeChar}" disabled>
+                    <option>正在读取服务器列表...</option>
+                </select>`;
+            }
+            if (voiceLibraryState !== 'ready') {
+                return `<input type="text" class="indextts-voice-input text_pole" data-char="${safeChar}" value="${escapeHtml(currentVoice)}" placeholder="手动填写文件名.wav">`;
+            }
+
+            const hasCurrentVoice = serverVoices.some(item => item.id === currentVoice);
+            const currentOption = currentVoice && !hasCurrentVoice
+                ? `<option value="${escapeHtml(currentVoice)}" selected>当前配置：${escapeHtml(currentVoice)}</option>`
+                : '';
+            const options = serverVoices.map(item => {
+                const label = item.name === item.id ? item.name : `${item.name} — ${item.id}`;
+                return `<option value="${escapeHtml(item.id)}"${item.id === currentVoice ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+            }).join('');
+            const emptyLabel = serverVoices.length ? '选择服务器参考音频' : '服务器暂无参考音频';
+            return `<select class="indextts-voice-select text_pole" data-char="${safeChar}" title="双击或右键可手动填写">
+                <option value=""${currentVoice ? '' : ' selected'}>${emptyLabel}</option>
+                ${currentOption}
+                ${options}
+                <option value="${manualVoiceValue}">✏️ 手动填写文件名…</option>
+            </select>`;
+        };
 
         const renderListResults = () => {
             const characters = getMergedCharacterList();
-            const container = document.getElementById('indextts-char-list-container');
+            const container = modal?.querySelector('#indextts-char-list-container');
             if (!container) return;
 
             let rowsHtml = characters.length === 0
                 ? '<div class="indextts-empty">未检测到角色 [角色|...]|「对话」</div>'
                 : characters.map(char => {
-                    const voice = voiceMap[char];
+                    const voice = String(voiceMap[char] || '');
                     const isConfigured = !!voice;
+                    const safeChar = escapeHtml(char);
                     return `
-                <div class="indextts-char-row" data-char="${char}">
-                    <div class="indextts-char-name" title="${char}">${char}</div>
+                <div class="indextts-char-row" data-char="${safeChar}">
+                    <div class="indextts-char-name" title="${safeChar}">${safeChar}</div>
                     <div class="indextts-char-audio">
-                        <div class="indextts-drop-area ${isConfigured ? 'configured' : ''}" data-char="${char}">
-                            <span class="indextts-drop-text">${voice || '未配置 (拖拽上传)'}</span>
+                        ${renderVoiceControl(char, voice)}
+                        <div class="indextts-drop-area ${isConfigured ? 'configured' : ''}">
+                            <span class="indextts-drop-text">
+                                <span class="indextts-upload-label-desktop">拖拽或点击上传/替换</span>
+                                <span class="indextts-upload-label-mobile">点击上传/替换</span>
+                            </span>
                             <input type="file" class="indextts-file-input" accept="audio/*" style="display:none;">
                         </div>
-                        <input type="text" class="indextts-voice-input text_pole" data-char="${char}" value="${voice || ''}" placeholder="文件名.wav">
-                        <div class="indextts-del-btn" data-char="${char}" title="删除配置"><i class="fa-solid fa-trash"></i></div>
                     </div>
+                    <button type="button" class="indextts-del-btn" data-char="${safeChar}" title="删除配置" aria-label="删除 ${safeChar} 的配音配置"><i class="fa-solid fa-trash"></i></button>
                 </div>
             `}).join('');
             container.innerHTML = `
@@ -1382,6 +1550,12 @@
                     <button class="menu_button" id="indextts-import"><i class="fa-solid fa-file-import"></i> 导入全部</button>
                     <button class="menu_button" id="indextts-export"><i class="fa-solid fa-file-export"></i> 导出全部</button>
                 </div>
+                <div class="indextts-voice-library-bar">
+                    <span id="indextts-voice-library-status" class="loading">正在读取服务器参考音频...</span>
+                    <button type="button" class="menu_button" id="indextts-refresh-voices" title="刷新服务器参考音频" aria-label="刷新服务器参考音频">
+                        <i class="fa-solid fa-rotate"></i>
+                    </button>
+                </div>
                 <div class="indextts-char-list" id="indextts-char-list-container"></div>
                 <div class="indextts-popup-footer">
                     <button class="menu_button" id="indextts-cancel">取消</button>
@@ -1391,7 +1565,72 @@
         `;
         document.body.appendChild(modal);
 
+        const updateVoiceLibraryStatus = () => {
+            const status = modal.querySelector('#indextts-voice-library-status');
+            if (!status) return;
+            status.textContent = voiceLibraryMessage;
+            status.className = voiceLibraryState;
+        };
+
+        const syncVisibleVoiceControls = () => {
+            modal.querySelectorAll('.indextts-voice-select').forEach(select => {
+                if (!select.disabled && select.value !== manualVoiceValue) {
+                    voiceMap[select.dataset.char] = select.value;
+                }
+            });
+            modal.querySelectorAll('.indextts-voice-input').forEach(input => {
+                voiceMap[input.dataset.char] = input.value.trim();
+            });
+        };
+
+        const refreshVoiceLibrary = async (silent = false) => {
+            if (!modal.isConnected) return;
+            const refreshButton = modal.querySelector('#indextts-refresh-voices');
+            syncVisibleVoiceControls();
+            if (!silent) {
+                if (refreshButton) refreshButton.disabled = true;
+                voiceLibraryState = 'loading';
+                voiceLibraryMessage = '正在读取服务器参考音频...';
+                updateVoiceLibraryStatus();
+                renderListResults();
+            }
+            try {
+                const nextVoices = await fetchServerVoices();
+                const listChanged = JSON.stringify(nextVoices) !== JSON.stringify(serverVoices);
+                const shouldRender = voiceLibraryState !== 'ready' || listChanged;
+                serverVoices = nextVoices;
+                voiceLibraryState = 'ready';
+                voiceLibraryMessage = `服务器参考音频：${serverVoices.length} 个`;
+                updateVoiceLibraryStatus();
+                if (shouldRender) renderListResults();
+            } catch (error) {
+                if (silent) return;
+                console.warn('[IndexTTS2] Voice library unavailable, using manual input:', error);
+                serverVoices = [];
+                voiceLibraryState = 'fallback';
+                voiceLibraryMessage = '无法读取服务器列表，已切换为手动填写';
+                updateVoiceLibraryStatus();
+                renderListResults();
+            } finally {
+                if (!silent && refreshButton) refreshButton.disabled = false;
+            }
+        };
+
+        let voiceRefreshTimer = setInterval(() => {
+            if (!modal.isConnected) {
+                clearInterval(voiceRefreshTimer);
+                return;
+            }
+            void refreshVoiceLibrary(true);
+        }, voiceRefreshIntervalMs);
+        const closeModal = () => {
+            clearInterval(voiceRefreshTimer);
+            modal.remove();
+        };
+
+        modal.querySelector('#indextts-refresh-voices').onclick = () => { void refreshVoiceLibrary(false); };
         renderListResults();
+        void refreshVoiceLibrary(false);
 
         // ==================== Card-scoped Voice Profile Management ====================
         const populatePopupPresetUI = () => {
@@ -1462,8 +1701,8 @@
         }
 
         // Handlers
-        modal.onclick = e => { if (e.target === modal) modal.remove(); };
-        modal.querySelector('#indextts-cancel').onclick = () => modal.remove();
+        modal.onclick = e => { if (e.target === modal) closeModal(); };
+        modal.querySelector('#indextts-cancel').onclick = closeModal;
 
         // Add Character
         const addBtn = modal.querySelector('#indextts-add-btn');
@@ -1483,22 +1722,18 @@
         addInput.onkeydown = (e) => { if (e.key === 'Enter') doAdd(); };
 
         modal.querySelector('#indextts-save').onclick = () => {
-            // Collect inputs one last time in case of manual typing
+            modal.querySelectorAll('.indextts-voice-select').forEach(select => {
+                if (!select.disabled && select.value !== manualVoiceValue) voiceMap[select.dataset.char] = select.value;
+            });
+            // 旧版服务没有列表接口时，继续保存手动文件名。
             modal.querySelectorAll('.indextts-voice-input').forEach(input => {
                 const char = input.dataset.char;
-                let val = input.value.trim();
-                if (val) {
-                    voiceMap[char] = ensureWavSuffix(val);
-                } else {
-                    // If manually added and cleared, do we delete?
-                    // Proposal: keep key if it was manually added?
-                    // Simplify: Just update value. If empty string, it remains empty in voiceMap (so it persists).
-                    voiceMap[char] = "";
-                }
+                const value = input.value.trim();
+                voiceMap[char] = value ? ensureWavSuffix(value) : '';
             });
             saveSettings();
             if (pluginToastr) pluginToastr.success('已保存');
-            modal.remove();
+            closeModal();
             refreshAllMessages();
         };
 
@@ -1556,10 +1791,21 @@
         };
 
         function bindRowEvents(container) {
+            const enterManualVoiceMode = char => {
+                if (!char || manualVoiceCharacters.has(char)) return;
+                manualVoiceCharacters.add(char);
+                renderListResults();
+                const row = Array.from(container.querySelectorAll('.indextts-char-row'))
+                    .find(item => item.dataset.char === char);
+                const input = row?.querySelector('.indextts-voice-input');
+                input?.focus();
+                input?.select();
+            };
+
             // Delete
             container.querySelectorAll('.indextts-del-btn').forEach(btn => {
                 btn.onclick = () => {
-                    const char = btn.dataset.char;
+                    const char = btn.closest('.indextts-char-row')?.dataset.char || btn.dataset.char;
                     if (confirm(`确定要移除角色 "${char}" 的配置吗？`)) {
                         delete voiceMap[char];
                         saveSettings();
@@ -1567,57 +1813,94 @@
                     }
                 };
             });
-            // Inputs
+
+            // IndexTTS-2.5：直接选择服务器 prompts/ 中的参考音频。
+            container.querySelectorAll('.indextts-voice-select').forEach(select => {
+                select.onchange = () => {
+                    const char = select.closest('.indextts-char-row')?.dataset.char || select.dataset.char;
+                    if (select.value === manualVoiceValue) {
+                        enterManualVoiceMode(char);
+                        return;
+                    }
+                    manualVoiceCharacters.delete(char);
+                    voiceMap[char] = select.value;
+                    saveSettings();
+                    const dropArea = select.closest('.indextts-char-row')?.querySelector('.indextts-drop-area');
+                    dropArea?.classList.toggle('configured', !!select.value);
+                };
+                const switchToManual = event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const char = select.closest('.indextts-char-row')?.dataset.char || select.dataset.char;
+                    enterManualVoiceMode(char);
+                };
+                select.onmousedown = event => {
+                    if (event.button === 0 && event.detail >= 2) switchToManual(event);
+                };
+                select.ondblclick = switchToManual;
+                select.oncontextmenu = switchToManual;
+            });
+
+            container.querySelectorAll('.indextts-voice-list-btn').forEach(button => {
+                button.onclick = () => {
+                    const row = button.closest('.indextts-char-row');
+                    const char = row?.dataset.char;
+                    if (!char) return;
+                    const input = row.querySelector('.indextts-voice-input');
+                    const value = input?.value.trim() || '';
+                    voiceMap[char] = value ? ensureWavSuffix(value) : '';
+                    manualVoiceCharacters.delete(char);
+                    saveSettings();
+                    renderListResults();
+                };
+            });
+
+            // IndexTTS 2.0 / 旧 API：列表读取失败时保留手动文件名。
             container.querySelectorAll('.indextts-voice-input').forEach(input => {
                 input.onchange = () => {
-                    const char = input.dataset.char;
-                    voiceMap[char] = input.value.trim();
-                    saveSettings(); // Save immediately on blur/change
+                    const char = input.closest('.indextts-char-row')?.dataset.char || input.dataset.char;
+                    const value = input.value.trim();
+                    voiceMap[char] = value ? ensureWavSuffix(value) : '';
+                    input.value = voiceMap[char];
+                    saveSettings();
                 };
             });
 
             // Drag & Drop
             container.querySelectorAll('.indextts-drop-area').forEach(area => {
-                const char = area.dataset.char;
+                const char = area.closest('.indextts-char-row')?.dataset.char || area.dataset.char;
                 const fileInput = area.querySelector('.indextts-file-input');
                 const dropText = area.querySelector('.indextts-drop-text');
-                const voiceInput = container.querySelector(`.indextts-voice-input[data-char="${char}"]`);
+                const uploadFile = async file => {
+                    if (!file) return;
+                    const uploaded = await handleUpload(char, file, dropText, area);
+                    if (fileInput) fileInput.value = '';
+                    if (!uploaded) return;
+
+                    serverVoices = serverVoices
+                        .filter(item => item.id !== uploaded.id)
+                        .concat(uploaded)
+                        .sort((left, right) => left.id.localeCompare(right.id, 'zh-CN'));
+                    voiceLibraryState = 'ready';
+                    voiceLibraryMessage = `服务器参考音频：${serverVoices.length} 个`;
+                    voiceMap[char] = uploaded.id;
+                    saveSettings();
+                    updateVoiceLibraryStatus();
+                    renderListResults();
+                };
 
                 area.onclick = e => { if (e.target !== fileInput) fileInput?.click(); };
                 fileInput.onchange = async () => {
-                    const file = fileInput.files[0];
-                    if (file) await handleUpload(char, file, dropText, voiceInput);
+                    await uploadFile(fileInput.files[0]);
                 };
                 area.ondragover = e => { e.preventDefault(); area.classList.add('dragover'); };
                 area.ondragleave = () => area.classList.remove('dragover');
                 area.ondrop = async e => {
                     e.preventDefault();
                     area.classList.remove('dragover');
-                    const file = e.dataTransfer.files[0];
-                    if (file) await handleUpload(char, file, dropText, voiceInput);
+                    await uploadFile(e.dataTransfer.files[0]);
                 };
             });
-        }
-    }
-
-    async function handleUpload(char, file, dropText, voiceInput) {
-        if (dropText) {
-            dropText.textContent = '转码并克隆中...';
-            dropText.className = 'indextts-drop-text cloning';
-        }
-
-        try {
-            const base64 = await convertToWav(file);
-            const id = await cloneVoice(char, base64);
-            if (id) {
-                const finalId = ensureWavSuffix(id);
-                if (dropText) { dropText.textContent = finalId; dropText.className = 'indextts-drop-text success'; }
-                if (voiceInput) voiceInput.value = finalId;
-            } else {
-                if (dropText) { dropText.textContent = '失败'; dropText.className = 'indextts-drop-text error'; }
-            }
-        } catch (e) {
-            if (dropText) { dropText.textContent = '错误'; dropText.className = 'indextts-drop-text error'; }
         }
     }
 
@@ -2986,7 +3269,7 @@
             <div id="indextts-settings" class="extension_settings">
                 <div class="inline-drawer">
                     <div class="inline-drawer-toggle inline-drawer-header">
-                        <b>IndexTTS2 播放器</b>
+                        <b>IndexTTS播放器</b>
                         <i class="inline-drawer-icon fa-solid fa-circle-chevron-down"></i>
                     </div>
                     <div class="inline-drawer-content" style="display:none;">

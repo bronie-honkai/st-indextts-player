@@ -1,9 +1,9 @@
 {
     "name": "st-indextts-player",
-    "display_name": "ST-IndexTTS Player",
+    "display_name": "IndexTTS播放器",
     "description": "兼容 IndexTTS 2.0 与 2.5 的 SillyTavern 播放器。",
     "author": "kirara",
-    "version": "2.0.3",
+    "version": "2.1.3",
     "loading_order": 101,
     "js": "index.js",
     "css": "style.css"
