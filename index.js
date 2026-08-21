@@ -108,6 +108,8 @@
         formatDialogueDisplay: true, // 仅将聊天气泡显示为“人名：「内容」”，不修改原始消息
         frontendCardCompatibility: false, // 前端卡兼容模式：不改写消息正文或向其中注入行内按钮
         autoInference: false, // 回复后自动推理
+        progressivePlayback: false, // 默认关闭；开启后魔棒推理达到缓冲句数即开始播放
+        playbackBufferSize: 5, // 渐进播放起播前至少准备的句数
         tavernNotifications: {
             enabled: true,
             success: false, // 绿色成功与普通信息默认关闭，避免“播放中”连续刷屏
@@ -463,6 +465,265 @@
         controller: null // { seek: fn, play: fn, pause: fn }
     };
     const inferenceLocks = new Set(); // 正在推理中的 mesId 集合
+    const inferenceJobs = new Map(); // mesId -> 当前推理任务及其可视进度
+    let inferenceJobSequence = 0;
+
+    const inferenceProgressUi = {
+        element: null,
+        anchor: null,
+        job: null,
+        anchorHovered: false,
+        panelHovered: false,
+        expanded: false,
+        hideTimer: null,
+        cleanupTimer: null,
+        repositionFrame: null,
+    };
+
+    function clearInferenceProgressHideTimer() {
+        if (inferenceProgressUi.hideTimer) {
+            clearTimeout(inferenceProgressUi.hideTimer);
+            inferenceProgressUi.hideTimer = null;
+        }
+    }
+
+    function hideInferenceProgress() {
+        const hiddenJob = inferenceProgressUi.job;
+        clearInferenceProgressHideTimer();
+        if (inferenceProgressUi.element) {
+            inferenceProgressUi.element.classList.remove('visible');
+        }
+        inferenceProgressUi.anchorHovered = false;
+        inferenceProgressUi.panelHovered = false;
+        inferenceProgressUi.expanded = false;
+        inferenceProgressUi.anchor = null;
+        inferenceProgressUi.job = null;
+        if (hiddenJob?.done && inferenceJobs.get(hiddenJob.mesId) === hiddenJob) {
+            clearTimeout(hiddenJob.cleanupTimer);
+            hiddenJob.cleanupTimer = setTimeout(() => {
+                if (inferenceJobs.get(hiddenJob.mesId) === hiddenJob && inferenceProgressUi.job !== hiddenJob) {
+                    inferenceJobs.delete(hiddenJob.mesId);
+                }
+            }, 3000);
+        }
+    }
+
+    function scheduleInferenceProgressHide(delay = 350) {
+        clearInferenceProgressHideTimer();
+        if (inferenceProgressUi.anchorHovered || inferenceProgressUi.panelHovered) return;
+        inferenceProgressUi.hideTimer = setTimeout(() => {
+            if (!inferenceProgressUi.anchorHovered && !inferenceProgressUi.panelHovered) {
+                hideInferenceProgress();
+            }
+        }, delay);
+    }
+
+    function ensureInferenceProgressPopover() {
+        if (inferenceProgressUi.element) return inferenceProgressUi.element;
+
+        const panel = document.createElement('div');
+        panel.className = 'indextts-inference-progress';
+        panel.setAttribute('role', 'status');
+        panel.setAttribute('aria-live', 'polite');
+        panel.innerHTML = `
+            <div class="indextts-inference-summary">
+                <span>推理进度</span>
+                <strong class="indextts-inference-count">0 / 0</strong>
+            </div>
+            <div class="indextts-inference-meter-row">
+                <div class="indextts-inference-meter" aria-hidden="true">
+                    <span class="indextts-inference-meter-fill"></span>
+                </div>
+                <strong class="indextts-inference-percent">0%</strong>
+            </div>
+            <button type="button" class="indextts-inference-expand" aria-expanded="false" title="展开推理详情">
+                <i class="fa-solid fa-chevron-down"></i>
+            </button>
+            <div class="indextts-inference-details" hidden>
+                <div class="indextts-inference-current-row"><span>当前</span><strong data-field="current">准备中</strong></div>
+                <div><span>缓存复用</span><strong data-field="cached">0</strong></div>
+                <div><span>新生成</span><strong data-field="generated">0</strong></div>
+                <div><span>失败</span><strong data-field="failed">0</strong></div>
+                <div><span>起播缓冲</span><strong data-field="buffer">0 / 0</strong></div>
+            </div>
+        `;
+        document.body.appendChild(panel);
+        inferenceProgressUi.element = panel;
+
+        panel.addEventListener('pointerenter', () => {
+            inferenceProgressUi.panelHovered = true;
+            clearInferenceProgressHideTimer();
+        });
+        panel.addEventListener('pointerleave', () => {
+            inferenceProgressUi.panelHovered = false;
+            scheduleInferenceProgressHide();
+        });
+
+        const expandBtn = panel.querySelector('.indextts-inference-expand');
+        expandBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            inferenceProgressUi.expanded = !inferenceProgressUi.expanded;
+            expandBtn.setAttribute('aria-expanded', String(inferenceProgressUi.expanded));
+            expandBtn.title = inferenceProgressUi.expanded ? '收起推理详情' : '展开推理详情';
+            panel.querySelector('.indextts-inference-details').hidden = !inferenceProgressUi.expanded;
+            panel.classList.toggle('expanded', inferenceProgressUi.expanded);
+            positionInferenceProgressPopover();
+        });
+
+        document.addEventListener('pointerdown', (event) => {
+            if (!panel.classList.contains('visible')) return;
+            if (panel.contains(event.target) || inferenceProgressUi.anchor?.contains(event.target)) return;
+            hideInferenceProgress();
+        }, true);
+
+        const reposition = () => {
+            if (!panel.classList.contains('visible')) return;
+            if (inferenceProgressUi.repositionFrame) cancelAnimationFrame(inferenceProgressUi.repositionFrame);
+            inferenceProgressUi.repositionFrame = requestAnimationFrame(() => {
+                inferenceProgressUi.repositionFrame = null;
+                positionInferenceProgressPopover();
+            });
+        };
+        window.addEventListener('resize', reposition);
+        window.addEventListener('scroll', reposition, true);
+        return panel;
+    }
+
+    function positionInferenceProgressPopover() {
+        const panel = inferenceProgressUi.element;
+        const anchor = inferenceProgressUi.anchor;
+        if (!panel || !anchor || !anchor.isConnected || !panel.classList.contains('visible')) {
+            if (panel?.classList.contains('visible')) hideInferenceProgress();
+            return;
+        }
+
+        const anchorRect = anchor.getBoundingClientRect();
+        const panelRect = panel.getBoundingClientRect();
+        const gap = 4;
+        const margin = 8;
+        let placement = 'bottom';
+        let top = anchorRect.bottom + gap;
+        if (top + panelRect.height > window.innerHeight - margin && anchorRect.top - panelRect.height - gap >= margin) {
+            placement = 'top';
+            top = anchorRect.top - panelRect.height - gap;
+        }
+        let left = anchorRect.left + (anchorRect.width - panelRect.width) / 2;
+        left = Math.max(margin, Math.min(left, window.innerWidth - panelRect.width - margin));
+        panel.dataset.placement = placement;
+        panel.style.top = `${Math.round(top)}px`;
+        panel.style.left = `${Math.round(left)}px`;
+    }
+
+    function renderInferenceProgress(job) {
+        const panel = inferenceProgressUi.element;
+        if (!panel || inferenceProgressUi.job !== job) return;
+
+        const total = Math.max(0, Number(job.total) || 0);
+        const completed = Math.min(total, Math.max(0, Number(job.completed) || 0));
+        const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+        panel.querySelector('.indextts-inference-count').textContent = `${completed} / ${total}`;
+        panel.querySelector('.indextts-inference-percent').textContent = `${percent}%`;
+        panel.querySelector('.indextts-inference-meter-fill').style.width = `${percent}%`;
+        panel.querySelector('[data-field="current"]').textContent = job.currentLabel || (job.done ? '已完成' : '准备中');
+        panel.querySelector('[data-field="cached"]').textContent = String((job.reusedCount || 0) + (job.cachedCount || 0));
+        panel.querySelector('[data-field="generated"]').textContent = String(job.generatedCount || 0);
+        panel.querySelector('[data-field="failed"]').textContent = String(job.failedCount || 0);
+        panel.querySelector('[data-field="buffer"]').textContent = job.progressive
+            ? `${Math.min(job.records.length, job.bufferTarget)} / ${job.bufferTarget}${job.playbackStarted ? '（已起播）' : ''}`
+            : '完成后播放';
+        panel.classList.toggle('complete', job.done && job.status === 'completed');
+        panel.classList.toggle('failed', job.done && job.status === 'failed');
+        positionInferenceProgressPopover();
+    }
+
+    function showInferenceProgress(job, anchor, forceToggle = false) {
+        if (!job || !anchor) return;
+        const panel = ensureInferenceProgressPopover();
+        const sameTarget = inferenceProgressUi.job === job && inferenceProgressUi.anchor === anchor;
+        if (forceToggle && sameTarget && panel.classList.contains('visible')) {
+            hideInferenceProgress();
+            return;
+        }
+        if (!sameTarget) inferenceProgressUi.expanded = false;
+        clearInferenceProgressHideTimer();
+        inferenceProgressUi.job = job;
+        inferenceProgressUi.anchor = anchor;
+        panel.querySelector('.indextts-inference-details').hidden = !inferenceProgressUi.expanded;
+        panel.querySelector('.indextts-inference-expand').setAttribute('aria-expanded', String(inferenceProgressUi.expanded));
+        panel.classList.toggle('expanded', inferenceProgressUi.expanded);
+        panel.classList.add('visible');
+        renderInferenceProgress(job);
+    }
+
+    function updateInferenceJob(job) {
+        if (!job) return;
+        if (inferenceProgressUi.job === job) renderInferenceProgress(job);
+        for (const resolve of job.waiters) resolve();
+        job.waiters.clear();
+    }
+
+    function finishInferenceJob(job, status = 'completed') {
+        if (!job) return;
+        job.done = true;
+        job.status = status;
+        job.currentLabel = status === 'completed' ? '已完成' : '推理异常结束';
+        updateInferenceJob(job);
+        if (inferenceProgressUi.job === job && !inferenceProgressUi.anchorHovered && !inferenceProgressUi.panelHovered) {
+            scheduleInferenceProgressHide(1200);
+        }
+        clearTimeout(job.cleanupTimer);
+        job.cleanupTimer = setTimeout(() => {
+            if (inferenceJobs.get(job.mesId) === job && inferenceProgressUi.job !== job) {
+                inferenceJobs.delete(job.mesId);
+            }
+        }, 30000);
+    }
+
+    function waitForInferenceJobUpdate(job) {
+        if (!job || job.done || job.playbackCancelled) return Promise.resolve();
+        return new Promise(resolve => job.waiters.add(resolve));
+    }
+
+    function setupInferenceProgressHover(button, msg) {
+        if (!button || !msg) return;
+        const existingJob = inferenceJobs.get(getMessageId(msg));
+        if (existingJob) {
+            existingJob.msg = msg;
+            if (inferenceProgressUi.job === existingJob && inferenceProgressUi.element?.classList.contains('visible')) {
+                inferenceProgressUi.anchor = button;
+                inferenceProgressUi.anchorHovered = button.matches(':hover');
+                renderInferenceProgress(existingJob);
+            }
+        }
+        const getJob = () => {
+            const job = inferenceJobs.get(getMessageId(msg));
+            if (job) {
+                job.msg = msg;
+                if (currentPlayback.mesId === job.mesId) currentPlayback.msg = msg;
+            }
+            return job;
+        };
+        button.onpointerenter = () => {
+            inferenceProgressUi.anchorHovered = true;
+            clearInferenceProgressHideTimer();
+            const job = getJob();
+            if (job) showInferenceProgress(job, button);
+        };
+        button.onpointerleave = () => {
+            inferenceProgressUi.anchorHovered = false;
+            scheduleInferenceProgressHide();
+        };
+        button.onfocus = () => {
+            inferenceProgressUi.anchorHovered = true;
+            const job = getJob();
+            if (job) showInferenceProgress(job, button);
+        };
+        button.onblur = () => {
+            inferenceProgressUi.anchorHovered = false;
+            scheduleInferenceProgressHide();
+        };
+    }
 
     // Mini player state
     let miniPlayerEl = null;
@@ -486,8 +747,18 @@
             console.warn('[IndexTTS2] clearMemoryAudioCache error:', e);
         }
         Object.keys(audioCache).forEach(k => delete audioCache[k]);
+        for (const job of inferenceJobs.values()) {
+            clearTimeout(job.cleanupTimer);
+            job.playbackCancelled = true;
+            if (typeof job.stopPlayback === 'function') job.stopPlayback();
+            updateInferenceJob(job);
+        }
+        inferenceJobs.clear();
+        hideInferenceProgress();
 
-        if (currentPlayback.audio) {
+        if (currentPlayback.stop) {
+            currentPlayback.stop();
+        } else if (currentPlayback.audio) {
             try { currentPlayback.audio.pause(); } catch (e) { }
         }
         currentPlayback = {
@@ -1249,7 +1520,9 @@
             setLinePlayingByEncoded(msg, encT, encC, true, lineEl);
         }
 
-        if (currentPlayback.audio) {
+        if (currentPlayback.stop) {
+            currentPlayback.stop();
+        } else if (currentPlayback.audio) {
             try { currentPlayback.audio.pause(); } catch (e) { }
         }
 
@@ -2014,7 +2287,20 @@
             setupMiniPlayerHover(playBtn);
         }
         if (inferBtn) {
-            inferBtn.onclick = e => { e.stopPropagation(); inferMessageAudios(msg, inferBtn); };
+            setupInferenceProgressHover(inferBtn, msg);
+            inferBtn.onclick = e => {
+                e.stopPropagation();
+                const mesId = getMessageId(msg);
+                const activeJob = mesId !== null ? inferenceJobs.get(mesId) : null;
+                if (mesId !== null && inferenceLocks.has(mesId)) {
+                    if (activeJob) {
+                        const isTouchLike = window.matchMedia?.('(hover: none)').matches === true;
+                        showInferenceProgress(activeJob, inferBtn, isTouchLike);
+                    }
+                    return;
+                }
+                inferMessageAudios(msg, inferBtn, false, { autoPlay: true });
+            };
         }
         if (configBtn) {
             configBtn.onclick = e => { e.stopPropagation(); showConfigPopup(); };
@@ -2270,6 +2556,23 @@
                 el.classList.remove('playing');
             }
         });
+    }
+
+    function setAudioRecordPlaying(msg, item, isPlaying) {
+        if (!msg || !item?.text) return;
+        const encT = utf8ToBase64(item.text);
+        const encC = utf8ToBase64(item.character || '');
+        const emotion = item.emotion || '';
+        const lang = String(item.lang || 'ZH').toUpperCase();
+        const candidates = Array.from(msg.querySelectorAll('.indextts-dialogue')).filter(element => (
+            element.dataset.t === encT
+            && element.dataset.c === encC
+            && (element.dataset.e || '') === emotion
+            && String(element.dataset.lang || 'ZH').toUpperCase() === lang
+        ));
+        const occurrence = Math.max(0, Number(item.matchOccurrence) || 0);
+        const lineEl = candidates[occurrence] || candidates[0] || null;
+        setLinePlayingByEncoded(msg, encT, encC, isPlaying, lineEl);
     }
 
     function ensureMiniPlayer() {
@@ -2752,6 +3055,15 @@
             elements.timeLeft.textContent = '-' + formatTime(total - elapsed);
         }
 
+        function updateQueueProgress(position, total) {
+            if (!container || !container.classList.contains('visible')) return;
+            const safeTotal = Math.max(1, Number(total) || 1);
+            const safePosition = Math.max(0, Math.min(safeTotal, Number(position) || 0));
+            elements.progress.value = Math.floor((safePosition / safeTotal) * 1000);
+            elements.timeCurr.textContent = `${Math.min(safeTotal, Math.floor(safePosition) + 1)}/${safeTotal}句`;
+            elements.timeLeft.textContent = `剩余${Math.max(0, Math.ceil(safeTotal - safePosition))}句`;
+        }
+
         function updatePlayState(isPlaying) {
             if (!container) return;
             elements.btnPlay.innerHTML = isPlaying ? '<i class="fa-solid fa-pause"></i>' : '<i class="fa-solid fa-play"></i>';
@@ -2856,13 +3168,188 @@
             }
         }
 
-        return { show, hide, updateProgress, updatePlayState, updateInfo };
+        return { show, hide, updateProgress, updateQueueProgress, updatePlayState, updateInfo };
     })();
 
-    async function inferMessageAudios(msg, triggerBtn, isSilent = false) {
+    async function playProgressiveInferenceJob(job) {
+        if (!job || job.playbackStarted || job.playbackCancelled) return;
+        job.playbackStarted = true;
+
+        if (currentPlayback.stop) {
+            currentPlayback.stop();
+        } else if (currentPlayback.audio) {
+            try { currentPlayback.audio.pause(); } catch (e) { }
+        }
+        clearPlayingInMessage(currentPlayback.msg);
+
+        const sessionId = `progressive-${job.id}`;
+        const settings = getSettings();
+        const avatarEl = job.msg?.querySelector('.avatar img');
+        let activeAudio = null;
+        let settleActive = null;
+        let currentIndex = 0;
+        let requestedIndex = null;
+        let userPaused = false;
+
+        const settleCurrentAudio = (reason) => {
+            if (activeAudio) {
+                try { activeAudio.pause(); } catch (e) { }
+            }
+            if (settleActive) {
+                const resolve = settleActive;
+                settleActive = null;
+                resolve(reason);
+            }
+        };
+
+        const controller = {
+            seek: (percent) => {
+                const availableTotal = Math.max(1, job.done ? job.records.length : job.total);
+                requestedIndex = Math.max(0, Math.min(availableTotal - 1, Math.floor(percent * availableTotal)));
+                settleCurrentAudio('navigate');
+                updateInferenceJob(job);
+            },
+            pause: () => {
+                userPaused = true;
+                if (activeAudio) activeAudio.pause();
+                TTSPlayerWindow.updatePlayState(false);
+            },
+            play: () => {
+                userPaused = false;
+                if (activeAudio) {
+                    activeAudio.play().catch(() => { });
+                }
+            },
+            next: () => {
+                requestedIndex = currentIndex + 1;
+                settleCurrentAudio('navigate');
+            },
+            prev: () => {
+                requestedIndex = Math.max(0, currentIndex - 1);
+                settleCurrentAudio('navigate');
+            },
+        };
+
+        job.stopPlayback = () => {
+            job.playbackCancelled = true;
+            settleCurrentAudio('stop');
+            updateInferenceJob(job);
+        };
+
+        currentPlayback.audio = null;
+        currentPlayback.msg = job.msg;
+        currentPlayback.mesId = job.mesId;
+        currentPlayback.playlist = job.records;
+        currentPlayback.totalDuration = 0;
+        currentPlayback.sessionId = sessionId;
+        currentPlayback.controller = controller;
+        currentPlayback.stop = job.stopPlayback;
+        TTSPlayerWindow.show(job.msg, controller);
+
+        try {
+            while (!job.playbackCancelled && currentPlayback.sessionId === sessionId) {
+                if (requestedIndex !== null) {
+                    currentIndex = requestedIndex;
+                    requestedIndex = null;
+                }
+
+                while (currentIndex >= job.records.length && !job.done && !job.playbackCancelled) {
+                    TTSPlayerWindow.updatePlayState(false);
+                    TTSPlayerWindow.updateInfo({ text: '正在缓冲后续语音...' });
+                    await waitForInferenceJobUpdate(job);
+                    if (requestedIndex !== null) break;
+                }
+
+                if (requestedIndex !== null) continue;
+                if (job.playbackCancelled || currentPlayback.sessionId !== sessionId) break;
+                if (currentIndex >= job.records.length) break;
+
+                const item = job.records[currentIndex];
+                const segmentAudio = new Audio(item.blobUrl);
+                activeAudio = segmentAudio;
+                segmentAudio.volume = Math.max(0, Math.min(1, parseFloat(getSettings().volume || 1.0)));
+                segmentAudio.playbackRate = parseFloat(getSettings().speed || 1.0);
+                currentPlayback.audio = segmentAudio;
+                currentPlayback.index = currentIndex;
+                currentPlayback.playlist = job.records;
+                attachMiniPlayerToAudio(segmentAudio, false);
+
+                let displayChar = item.character || 'Unknown';
+                if (displayChar.toLowerCase() === 'narrator' && avatarEl) {
+                    const nameEl = job.msg.querySelector('.ch_name');
+                    if (nameEl) displayChar = nameEl.textContent.trim();
+                }
+                TTSPlayerWindow.updateInfo({
+                    name: displayChar,
+                    text: item.displayText || item.text,
+                    avatarUrl: avatarEl ? avatarEl.src : null,
+                });
+                setAudioRecordPlaying(job.msg, item, true);
+
+                const result = await new Promise(resolve => {
+                    let settled = false;
+                    const finishSegment = (reason) => {
+                        if (settled) return;
+                        settled = true;
+                        if (settleActive === finishSegment) settleActive = null;
+                        resolve(reason);
+                    };
+                    settleActive = finishSegment;
+                    segmentAudio.addEventListener('timeupdate', () => {
+                        const fraction = segmentAudio.duration > 0 ? segmentAudio.currentTime / segmentAudio.duration : 0;
+                        TTSPlayerWindow.updateQueueProgress(currentIndex + fraction, Math.max(1, job.total));
+                    });
+                    segmentAudio.addEventListener('play', () => TTSPlayerWindow.updatePlayState(true));
+                    segmentAudio.addEventListener('pause', () => TTSPlayerWindow.updatePlayState(false));
+                    segmentAudio.addEventListener('ended', () => finishSegment('ended'), { once: true });
+                    segmentAudio.addEventListener('error', () => finishSegment('error'), { once: true });
+                    if (!userPaused) {
+                        segmentAudio.play().catch(error => {
+                            console.warn('[IndexTTS2] 渐进播放被浏览器拦截:', error);
+                            TTSPlayerWindow.updatePlayState(false);
+                            if (pluginToastr) pluginToastr.warning('自动播放被拦截，请点击播放器继续');
+                        });
+                    }
+                });
+
+                setAudioRecordPlaying(job.msg, item, false);
+                activeAudio = null;
+                currentPlayback.audio = null;
+                if (result === 'stop') break;
+                if (requestedIndex === null) currentIndex++;
+            }
+        } finally {
+            if (activeAudio) {
+                try { activeAudio.pause(); } catch (e) { }
+            }
+            clearPlayingInMessage(job.msg);
+            if (currentPlayback.sessionId === sessionId) {
+                currentPlayback.audio = null;
+                currentPlayback.index = -1;
+                currentPlayback.stop = null;
+                TTSPlayerWindow.updatePlayState(false);
+                attachMiniPlayerToAudio(null, false);
+            }
+        }
+    }
+
+    function maybeStartProgressivePlayback(job, force = false) {
+        if (!job?.autoPlay || !job.progressive || job.playbackStarted || job.playbackCancelled) return;
+        if (!job.records.length) return;
+        if (!force && job.records.length < job.bufferTarget) return;
+        playProgressiveInferenceJob(job).catch(error => {
+            console.error('[IndexTTS2] 渐进播放失败:', error);
+            if (pluginToastr) pluginToastr.error('边推理边播放失败: ' + error.message);
+        });
+    }
+
+    async function inferMessageAudios(msg, triggerBtn, isSilent = false, options = {}) {
         if (!msg) return;
         const mesId = getMessageId(msg);
         if (mesId === null || mesId === undefined) return;
+        const autoPlay = options.autoPlay === true;
+        let job = null;
+        let playAfterCompletion = false;
 
         // 推理锁：防止重复请求
         if (inferenceLocks.has(mesId)) {
@@ -2875,7 +3362,8 @@
         let originalIconClass = '';
 
         if (triggerBtn) {
-            triggerBtn.classList.add('disabled');
+            triggerBtn.classList.add('indextts-inferring');
+            triggerBtn.setAttribute('aria-busy', 'true');
             iconEl = triggerBtn.querySelector('i');
             if (iconEl) {
                 originalIconClass = iconEl.className;
@@ -2884,27 +3372,82 @@
         } else {
             // 自动推理时的 UI 反馈（给播放和推理按钮加呼吸灯）
             const inferBtn = msg.querySelector('.indextts-infer');
-            if (inferBtn) inferBtn.classList.add('indextts-inferring');
+            if (inferBtn) {
+                inferBtn.classList.add('indextts-inferring');
+                inferBtn.setAttribute('aria-busy', 'true');
+            }
         }
 
         try {
-            const cardId = getCardId();
             const lines = collectVNLinesFromMessage(msg);
+            const occurrenceBySignature = new Map();
+            const voicedLines = lines.filter(line => line.voice).map(line => {
+                const signature = JSON.stringify([
+                    line.text,
+                    line.character || '',
+                    line.emotion || '',
+                    String(line.lang || 'ZH').toUpperCase(),
+                ]);
+                const matchOccurrence = occurrenceBySignature.get(signature) || 0;
+                occurrenceBySignature.set(signature, matchOccurrence + 1);
+                return { ...line, matchOccurrence };
+            });
             const previousList = Array.isArray(audioCache[mesId]) ? audioCache[mesId] : [];
             const list = [];
-            const unvoicedCount = lines.filter(l => !l.voice).length;
+            const unvoicedCount = lines.length - voicedLines.length;
             let cachedCount = 0;
             let reusedCount = 0;
+
+            const settings = getSettings();
+            const bufferTarget = Math.max(1, Math.min(20, parseInt(settings.playbackBufferSize, 10) || 5));
+            const oldJob = inferenceJobs.get(mesId);
+            if (oldJob) {
+                clearTimeout(oldJob.cleanupTimer);
+                if (oldJob.playbackStarted && !oldJob.playbackCancelled && typeof oldJob.stopPlayback === 'function') {
+                    oldJob.stopPlayback();
+                }
+            }
+            job = {
+                id: `${mesId}-${Date.now()}-${++inferenceJobSequence}`,
+                mesId,
+                msg,
+                total: voicedLines.length,
+                completed: 0,
+                currentLabel: voicedLines.length ? '准备中' : '没有可推理台词',
+                reusedCount: 0,
+                cachedCount: 0,
+                generatedCount: 0,
+                failedCount: 0,
+                skippedCount: unvoicedCount,
+                records: list,
+                bufferTarget,
+                progressive: autoPlay && settings.progressivePlayback === true,
+                autoPlay,
+                playbackStarted: false,
+                playbackCancelled: false,
+                done: false,
+                status: 'running',
+                waiters: new Set(),
+                cleanupTimer: null,
+            };
+            inferenceJobs.set(mesId, job);
+            const progressButton = triggerBtn || msg.querySelector('.indextts-infer');
+            const isTouchLike = window.matchMedia?.('(hover: none)').matches === true;
+            if (progressButton && (progressButton.matches(':hover') || (triggerBtn && isTouchLike))) {
+                inferenceProgressUi.anchorHovered = progressButton.matches(':hover');
+                showInferenceProgress(job, progressButton);
+            }
+            updateInferenceJob(job);
 
             if (!lines.length) {
                 if (!isSilent && pluginToastr) pluginToastr.warning('未在消息中发现符合格式的 [角色] 文本，请检查是否为 GAL 模式及剧本格式');
             } else if (unvoicedCount === lines.length) {
                 if (!isSilent && pluginToastr) pluginToastr.warning('发现角色对话但均未在配置表格中关联配音，请先点击配置绑定音色');
             } else {
-                for (const line of lines) {
+                for (const line of voicedLines) {
+                    job.currentLabel = `${line.character || '未知角色'}：${line.displayText || line.text}`;
+                    updateInferenceJob(job);
                     try {
-                        if (!line.voice) continue;
-
                         const lineHash = await generateInferenceLineHash(line);
                         const previous = previousList.find(item => item.hash === lineHash && item.blobUrl);
 
@@ -2919,33 +3462,48 @@
                                 emotion: line.emotion || null,
                                 lang: line.lang || 'ZH',
                                 hash: lineHash,
+                                matchOccurrence: line.matchOccurrence,
                             });
                             reusedCount++;
-                            continue;
+                            job.reusedCount = reusedCount;
+                        } else {
+                            const record = await ensureAudioRecord({
+                                text: line.text,
+                                character: line.character,
+                                voice: line.voice,
+                                emotion: line.emotion,
+                                lang: line.lang || 'ZH',
+                            });
+                            if (!record) {
+                                job.failedCount++;
+                            } else {
+                                if (record.isCached) {
+                                    cachedCount++;
+                                    job.cachedCount = cachedCount;
+                                } else {
+                                    job.generatedCount++;
+                                }
+                                const blobUrl = URL.createObjectURL(record.blob);
+                                list.push({
+                                    text: line.text,
+                                    displayText: line.displayText || line.text,
+                                    character: line.character,
+                                    voice: line.voice,
+                                    emotion: line.emotion || null,
+                                    lang: line.lang || 'ZH',
+                                    hash: lineHash,
+                                    blobUrl,
+                                    matchOccurrence: line.matchOccurrence,
+                                });
+                            }
                         }
-
-                        const record = await ensureAudioRecord({
-                            text: line.text,
-                            character: line.character,
-                            voice: line.voice,
-                            emotion: line.emotion,
-                            lang: line.lang || 'ZH',
-                        });
-                        if (!record) continue;
-                        if (record.isCached) cachedCount++;
-                        const blobUrl = URL.createObjectURL(record.blob);
-                        list.push({
-                            text: line.text,
-                            displayText: line.displayText || line.text,
-                            character: line.character,
-                            voice: line.voice,
-                            emotion: line.emotion || null,
-                            lang: line.lang || 'ZH',
-                            hash: lineHash,
-                            blobUrl,
-                        });
                     } catch (e) {
                         console.error('[IndexTTS2] inferMessageAudios line error:', e);
+                        job.failedCount++;
+                    } finally {
+                        job.completed++;
+                        updateInferenceJob(job);
+                        maybeStartProgressivePlayback(job);
                     }
                 }
             }
@@ -2959,6 +3517,9 @@
             });
 
             audioCache[mesId] = list;
+            finishInferenceJob(job, 'completed');
+            maybeStartProgressivePlayback(job, true);
+            playAfterCompletion = autoPlay && !job.progressive && list.length > 0;
 
             if (list.length) {
                 const playBtn = msg.querySelector('.indextts-play');
@@ -2981,17 +3542,27 @@
             }
 
             return list;
+        } catch (error) {
+            console.error('[IndexTTS2] inferMessageAudios failed:', error);
+            if (job && !job.done) finishInferenceJob(job, 'failed');
+            if (!isSilent && pluginToastr) pluginToastr.error('楼层推理失败: ' + error.message);
+            return audioCache[mesId] || [];
         } finally {
             inferenceLocks.delete(mesId);
             if (triggerBtn) {
-                triggerBtn.classList.remove('disabled');
+                triggerBtn.classList.remove('indextts-inferring');
+                triggerBtn.removeAttribute('aria-busy');
                 if (iconEl && originalIconClass) {
                     iconEl.className = originalIconClass;
                 }
             } else {
                 const inferBtn = msg.querySelector('.indextts-infer');
-                if (inferBtn) inferBtn.classList.remove('indextts-inferring');
+                if (inferBtn) {
+                    inferBtn.classList.remove('indextts-inferring');
+                    inferBtn.removeAttribute('aria-busy');
+                }
             }
+            if (playAfterCompletion) playMessageQueue(msg, null);
         }
     }
 
@@ -3075,6 +3646,9 @@
                         text: item.text,
                         displayText: item.displayText || item.text,
                         character: item.character,
+                        emotion: item.emotion || null,
+                        lang: item.lang || 'ZH',
+                        matchOccurrence: item.matchOccurrence || 0,
                         start: boundaries[i].start,
                         end: boundaries[i].end,
                     }));
@@ -3110,6 +3684,17 @@
             currentPlayback.mesId = mesId;
             currentPlayback.playlist = null;
             currentPlayback.totalDuration = totalDuration;
+            let mergedUrlReleased = false;
+            const releaseMergedUrl = () => {
+                if (mergedUrlReleased) return;
+                mergedUrlReleased = true;
+                URL.revokeObjectURL(mergedBlobUrl);
+            };
+            currentPlayback.stop = () => {
+                try { audio.pause(); } catch (e) { }
+                clearPlayingInMessage(msg);
+                releaseMergedUrl();
+            };
 
             // 初始化浮窗信息（用第一句台词）
             const avatarEl = msg.querySelector('.avatar img');
@@ -3135,10 +3720,10 @@
                 if (idx !== -1 && idx !== lastHighlightIndex) {
                     if (lastHighlightIndex !== -1) {
                         const prev = lineTimeline[lastHighlightIndex];
-                        setLinePlayingByEncoded(msg, utf8ToBase64(prev.text), utf8ToBase64(prev.character || ''), false);
+                        setAudioRecordPlaying(msg, prev, false);
                     }
                     const curr = lineTimeline[idx];
-                    setLinePlayingByEncoded(msg, utf8ToBase64(curr.text), utf8ToBase64(curr.character || ''), true);
+                    setAudioRecordPlaying(msg, curr, true);
                     lastHighlightIndex = idx;
 
                     // 更新浮窗台词信息
@@ -3163,10 +3748,10 @@
             audio.addEventListener('ended', () => {
                 if (lastHighlightIndex !== -1) {
                     const last = lineTimeline[lastHighlightIndex];
-                    setLinePlayingByEncoded(msg, utf8ToBase64(last.text), utf8ToBase64(last.character || ''), false);
+                    setAudioRecordPlaying(msg, last, false);
                 }
                 clearPlayingInMessage(msg);
-                URL.revokeObjectURL(mergedBlobUrl);
+                releaseMergedUrl();
             });
 
             // 绑定迷你播放器（现在 isGlobal 时也走单文件进度分支）
@@ -3383,9 +3968,20 @@
                                 <label for="indextts-format-dialogue-display">对话显示为“人名：「内容」”</label>
                                 <input type="checkbox" id="indextts-format-dialogue-display"${settings.formatDialogueDisplay !== false ? ' checked' : ''}>
                             </div>
-                             <div class="indextts-setting-row checkbox-row">
+                            <div class="indextts-setting-row checkbox-row">
                                 <label for="indextts-auto-inference">回复后自动推理</label>
                                 <input type="checkbox" id="indextts-auto-inference"${settings.autoInference === true ? ' checked' : ''}>
+                            </div>
+                            <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-progressive-playback">边推理边播放</label>
+                                <input type="checkbox" id="indextts-progressive-playback"${settings.progressivePlayback === true ? ' checked' : ''}>
+                            </div>
+                            <div class="indextts-setting-row">
+                                <label for="indextts-playback-buffer-size">起播缓冲句数</label>
+                                <input type="number" id="indextts-playback-buffer-size" class="text_pole" min="1" max="20" step="1" value="${Math.max(1, Math.min(20, parseInt(settings.playbackBufferSize, 10) || 5))}">
+                            </div>
+                            <div style="color:#aaa; font-size:12px; margin:-4px 0 8px; line-height:1.5;">
+                                魔棒推理准备到指定句数后开始播放，后续语音继续按正文顺序生成；关闭后会等待整楼推理完成再播放。
                             </div>
                             <div class="indextts-setting-row">
                                 <label>默认朗读音色</label>
@@ -3503,6 +4099,25 @@
         bindCheckbox('#indextts-frontend-card-compatibility', 'frontendCardCompatibility', true);
         bindCheckbox('#indextts-format-dialogue-display', 'formatDialogueDisplay', true);
         bindCheckbox('#indextts-auto-inference', 'autoInference', false);
+        bindCheckbox('#indextts-progressive-playback', 'progressivePlayback', false);
+
+        const progressivePlaybackInput = panel.querySelector('#indextts-progressive-playback');
+        const playbackBufferInput = panel.querySelector('#indextts-playback-buffer-size');
+        const syncPlaybackBufferState = () => {
+            if (playbackBufferInput) playbackBufferInput.disabled = progressivePlaybackInput?.checked !== true;
+        };
+        if (progressivePlaybackInput) progressivePlaybackInput.addEventListener('change', syncPlaybackBufferState);
+        if (playbackBufferInput) {
+            const savePlaybackBufferSize = () => {
+                const value = Math.max(1, Math.min(20, parseInt(playbackBufferInput.value, 10) || 5));
+                playbackBufferInput.value = String(value);
+                getSettings().playbackBufferSize = value;
+                saveSettings();
+            };
+            playbackBufferInput.addEventListener('change', savePlaybackBufferSize);
+            playbackBufferInput.addEventListener('blur', savePlaybackBufferSize);
+        }
+        syncPlaybackBufferState();
 
         const bindNotificationCheckbox = (id, field) => {
             const el = panel.querySelector(id);
