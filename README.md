@@ -9,6 +9,8 @@
 
 # ST-IndexTTS Player 🎙️
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 一个为 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 设计的高级文本转语音（TTS）播放器扩展，支持智能角色配音、参考音频、行内播放、多种解析模式等功能。
 
 **版本**: 2.1.4 | **作者**: kirara
@@ -1248,5 +1250,13 @@ MIT License
 
 - 首次发布。
 - 支持多角色配音、GAL/听书解析、行内播放、迷你播放器、IndexedDB 缓存和自动推理。
+
+## 📄 开源协议
+
+本项目采用 [MIT License](LICENSE) 开源。
+
+你可以自由使用、复制、修改、合并、发布和分发本项目，也可以将其用于商业用途；使用或再分发时请保留原始版权声明和许可证文本。
+
+---
 
 **感谢使用 ST-IndexTTS Player! 🎉**
