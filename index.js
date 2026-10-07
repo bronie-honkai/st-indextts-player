@@ -46,7 +46,7 @@
         AR: buildOtherDubPromptV1('هل ستأخذ ميسوزو إلى ذلك المكان؟'),
     };
 
-    const buildOtherDubPrompt = (example) => `<OTHER_COUNTRY_DUBBING_INSTRUCTIONS>
+    const buildOtherDubPrompt = (example, japaneseRules = '') => `<OTHER_COUNTRY_DUBBING_INSTRUCTIONS>
 你正在为角色对话生成他国语音配音文本。
 
 目标配音语言：{{TARGET_LANGUAGE}}
@@ -67,7 +67,7 @@
 - 发音标注的唯一格式是 \`<文字|发音>\`：竖线左边写配音文本中原本要显示的文字，竖线右边写 TTS 实际必须读出的目标语言发音。
 - 这不是解释、译注或罗马音注释；它是给 TTS 的强制读音指令。输出后，TTS 会显示并朗读左边的文字，但按右边的发音读出。
 - 每个角色的人名、地名、作品名、组织名、昵称、罕见词，以及存在多种读法或可能误读的词，**必须主动**使用发音标注；不要等待用户要求。
-- 对于日语：汉字姓名和专有名词的右侧必须写正确的假名读音（平假名或片假名），禁止写罗马字。例如 \`<観鈴|みすず>\`、\`<名雪|なゆき>\`、\`<月宮|つきみや>\`。
+- 对于日语：汉字姓名和专有名词的右侧必须写正确的假名读音（平假名或片假名），禁止写罗马字。例如 \`<観鈴|みすず>\`、\`<名雪|なゆき>\`、\`<月宮|つきみや>\`。${japaneseRules ? `\n${japaneseRules}` : ''}
 - 对于其他目标语言：右侧写该目标语言中实际应被朗读的读音；只有发音确实需要纠正时才标注普通词，不要给整句每个普通词滥加标注。
 - 同一个专有名词在每一条 \`@VOICE-{{LANG_CODE}}:\` 配音行中出现时，都要重复保留其发音标注，不能只在第一次出现时标一次。
 - 发音标注只能写在 \`@VOICE-{{LANG_CODE}}:\` 行内，绝不能写入中文原文行、旁白、括号说明或正文其他位置。
@@ -86,8 +86,13 @@
 10. 如果某行不是需要朗读的台词，则不要生成对应的配音行。
 </OTHER_COUNTRY_DUBBING_INSTRUCTIONS>`;
 
+    const PREVIOUS_JAPANESE_DUB_PROMPT = buildOtherDubPrompt('その場所に、<観鈴|みすず>を連れていってくれる？');
+    const JAPANESE_PRONUNCIATION_RULES = `- 日语注音必须遵循约定俗成的读法和假名写法：汉字词和日本人名通常用平假名；外来词、外国人名及已有惯用片假名写法的词使用片假名，例如 \`<珈琲|コーヒー>\`，不要自行生造读音。
+- 每个 \`<文字|发音>\` 右侧只能使用平假名或片假名中的一种，严禁在同一条注音中混写，例如禁止 \`<珈琲|こーヒー>\`、\`<東京|とうキョウ>\`。混写会影响语音效果；不同词的独立注音可以分别使用各自惯用的假名。
+- 长音按惯用写法保留：片假名注音可使用长音符号 \`ー\`，例如 \`<珈琲|コーヒー>\`；平假名注音用规范的元音写法，例如 \`<東京|とうきょう>\`，禁止平假名搭配 \`ー\`，例如 \`<東京|とーきょー>\`。`;
+
     const OTHER_DUB_LANGUAGES = {
-        JA: { name: '日语', prompt: buildOtherDubPrompt('その場所に、<観鈴|みすず>を連れていってくれる？') },
+        JA: { name: '日语', prompt: buildOtherDubPrompt('その場所に、<観鈴|みすず>を連れていってくれる？', JAPANESE_PRONUNCIATION_RULES) },
         EN: { name: '英语', prompt: buildOtherDubPrompt('Will you take Misuzu to that place?') },
         ES: { name: '西班牙语', prompt: buildOtherDubPrompt('¿Me llevarás a Misuzu a ese lugar?') },
         AR: { name: '阿拉伯语', prompt: buildOtherDubPrompt('هل ستأخذ ميسوزو إلى ذلك المكان؟') },
@@ -281,11 +286,11 @@
         // 使用深度合并补齐所有缺失字段（包括 promptInjection、vnRegex 等子对象）
         deepMergeDefaults(active, defaultSettings);
         const voiceProfilesMigrated = ensureVoiceProfileRoot(root);
-        // 仅迁移上一版内置的短提示词；用户自行编辑过的内容保持原样。
+        // 仅迁移旧版内置提示词；用户自行编辑过的内容保持原样。
         const dubPrompts = active.otherCountryDubbing?.prompts;
         if (dubPrompts && typeof dubPrompts === 'object') {
             for (const [code, legacyPrompt] of Object.entries(LEGACY_OTHER_DUB_PROMPTS)) {
-                if (!dubPrompts[code] || dubPrompts[code] === legacyPrompt || dubPrompts[code] === PREVIOUS_OTHER_DUB_PROMPTS[code]) {
+                if (!dubPrompts[code] || dubPrompts[code] === legacyPrompt || dubPrompts[code] === PREVIOUS_OTHER_DUB_PROMPTS[code] || (code === 'JA' && dubPrompts[code] === PREVIOUS_JAPANESE_DUB_PROMPT)) {
                     dubPrompts[code] = OTHER_DUB_LANGUAGES[code].prompt;
                 }
             }
